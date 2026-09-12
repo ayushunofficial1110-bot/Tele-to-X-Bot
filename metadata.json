@@ -1,0 +1,6 @@
+{
+  "name": "X ↔ Telegram Automation Bot",
+  "description": "Multi-user SaaS platform and Telegram Bot automating cross-posting between X (Twitter) and Telegram with smart AI rewriting, ad filtering, rate-limit protection, and admin controls.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
