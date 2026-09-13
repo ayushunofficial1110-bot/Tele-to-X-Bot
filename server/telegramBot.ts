@@ -23,13 +23,23 @@ interface WizardState {
 
 const userWizards: Map<string, WizardState> = new Map();
 
+// Process-wide global keys to ensure an absolute singleton across imports, re-evaluations, and worker loops
+const GLOBAL_BOT_HANDLER_KEY = Symbol.for('x2telegram.telegramBotSingleton');
+const GLOBAL_POLLING_LOCK_KEY = Symbol.for('x2telegram.telegramPollingLock');
+
 export class TelegramBotHandler {
   private isPolling = false;
   private pollingLoopRunning = false;
+  private runningLoopPromise: Promise<void> | null = null;
+  private abortController: AbortController | null = null;
+  private currentLoopId = 0;
+  private hasLoggedStart = false;
   private lastUpdateId = 0;
   private consecutiveErrors = 0;
+  private consecutiveConflicts = 0;
   private isTokenUnauthorized = false;
   private lastUnauthorizedToken = '';
+  private webhookChecked = false;
 
   /**
    * Main entry point for live Telegram Webhooks, Long Polling, and Web Simulator
@@ -163,18 +173,50 @@ export class TelegramBotHandler {
   }
 
   public startPolling() {
-    if (this.isPolling) {
-      console.log('[Telegram Bot] startPolling called, but polling worker is already active.');
+    const globalAny = globalThis as any;
+
+    // Startup guard: ensure only ONE polling worker can ever run per Node.js process
+    if (this.isPolling || this.pollingLoopRunning || globalAny[GLOBAL_POLLING_LOCK_KEY]) {
       return;
     }
+
     this.isPolling = true;
-    console.log('[Telegram Bot] Initializing Telegram Bot long-polling worker...');
-    db.logSystem('info', 'telegram_bot', 'Telegram Bot long-polling worker started.');
-    this.runPollingLoop();
+    const loopId = ++this.currentLoopId;
+    globalAny[GLOBAL_POLLING_LOCK_KEY] = { loopId, startedAt: Date.now() };
+
+    if (!this.hasLoggedStart) {
+      this.hasLoggedStart = true;
+      console.log('[Telegram Bot] Telegram Bot long-polling worker started.');
+      db.logSystem('info', 'telegram_bot', 'Telegram Bot long-polling worker started.');
+    }
+
+    this.runPollingLoop(loopId).catch((err) => {
+      console.error('[Telegram Bot] Unexpected fatal polling error:', err);
+    });
   }
 
-  public stopPolling() {
+  public async stopPolling(): Promise<void> {
     this.isPolling = false;
+    const globalAny = globalThis as any;
+    delete globalAny[GLOBAL_POLLING_LOCK_KEY];
+
+    // Abort active long-polling request immediately to free up Telegram connection
+    if (this.abortController) {
+      try {
+        this.abortController.abort();
+      } catch {}
+      this.abortController = null;
+    }
+
+    // Wait for running loop to finish if it's currently awaiting
+    if (this.runningLoopPromise) {
+      try {
+        await this.runningLoopPromise;
+      } catch {}
+      this.runningLoopPromise = null;
+    }
+
+    this.pollingLoopRunning = false;
     console.log('[Telegram Bot] Polling worker stopped.');
   }
 
@@ -183,8 +225,12 @@ export class TelegramBotHandler {
       this.isTokenUnauthorized = false;
       this.lastUnauthorizedToken = '';
       this.consecutiveErrors = 0;
+      this.consecutiveConflicts = 0;
     }
-    if (!this.isPolling) {
+
+    const globalAny = globalThis as any;
+    // Only initialize if not already running anywhere in this Node process
+    if (!this.isPolling && !this.pollingLoopRunning && !globalAny[GLOBAL_POLLING_LOCK_KEY]) {
       this.startPolling();
     }
   }
@@ -200,193 +246,236 @@ export class TelegramBotHandler {
     };
   }
 
-  private async runPollingLoop() {
+  private async runPollingLoop(loopId: number): Promise<void> {
     if (this.pollingLoopRunning) {
-      console.log('[Telegram Bot] Polling loop is already running.');
       return;
     }
     this.pollingLoopRunning = true;
 
-    let webhookChecked = false;
-
-    while (this.isPolling) {
-      const token = telegramClient.getActiveToken();
-      if (!token || token.length < 10) {
-        await new Promise((r) => setTimeout(r, 5000));
-        continue;
-      }
-
-      // If token changed, reset unauthorized state
-      if (this.lastUnauthorizedToken && token !== this.lastUnauthorizedToken) {
-        this.isTokenUnauthorized = false;
-        this.lastUnauthorizedToken = '';
-        this.consecutiveErrors = 0;
-        webhookChecked = false;
-      }
-
-      // If this token was identified as unauthorized (401), pause polling until updated
-      if (this.isTokenUnauthorized && token === this.lastUnauthorizedToken) {
-        await new Promise((r) => setTimeout(r, 15000));
-        continue;
-      }
-
-      // Check webhook status once on start to remove any conflicting webhook while keeping pending updates
-      if (!webhookChecked) {
-        try {
-          const webhookInfo = await telegramClient.getWebhookInfo(token);
-          if (webhookInfo && webhookInfo.url) {
-            console.log(
-              `[Telegram Bot] Active webhook found (${webhookInfo.url}). Clearing webhook to enable long-polling without losing pending updates...`
-            );
-            await telegramClient.deleteWebhook(false, token);
-            console.log('[Telegram Bot] Webhook deleted successfully.');
-          } else {
-            console.log(
-              `[Telegram Bot] Webhook status verified (clean). Pending updates in queue: ${webhookInfo?.pending_update_count ?? '0'}.`
-            );
-          }
-          webhookChecked = true;
-        } catch (err: unknown) {
-          const msg = err instanceof Error ? err.message : String(err);
-          console.warn(`[Telegram Bot] Notice during webhook verification: ${msg}`);
-          webhookChecked = true;
-        }
-      }
-
-      try {
-        const payload: any = {
-          timeout: 25,
-          limit: 100,
-          allowed_updates: ['message', 'channel_post', 'callback_query', 'my_chat_member'],
-        };
-        // Advance offset: must be greater by 1 than highest update_id seen
-        if (this.lastUpdateId > 0) {
-          payload.offset = this.lastUpdateId + 1;
-        }
-
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 35000); // 25s long-poll + 10s buffer
-
-        const res = await fetch(`https://api.telegram.org/bot${token}/getUpdates`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(payload),
-          signal: controller.signal,
-        });
-
-        clearTimeout(timeoutId);
-
-        if (!res.ok) {
-          const status = res.status;
-          const text = await res.text();
-          let json: any = null;
-          try {
-            json = JSON.parse(text);
-          } catch {}
-
-          if (status === 401) {
-            this.isTokenUnauthorized = true;
-            this.lastUnauthorizedToken = token;
-            console.warn(
-              `[Telegram Bot] ⚠️ Configured Bot Token is unauthorized or revoked by @BotFather (HTTP 401). Polling paused. Please set a valid TELEGRAM_BOT_TOKEN environment variable or configure in Admin Settings.`
-            );
-            db.logSystem(
-              'warn',
-              'telegram_bot',
-              'Configured Telegram Bot Token returned HTTP 401 Unauthorized. Polling paused until a valid token is provided.'
-            );
-            await new Promise((r) => setTimeout(r, 15000));
-            continue;
-          }
-
-          if (status === 409) {
-            console.warn('[Telegram Bot] ⚠️ Conflict (409): Webhook active or duplicate getUpdates. Clearing webhook...');
-            try {
-              await telegramClient.deleteWebhook(false, token);
-            } catch {}
-            await new Promise((r) => setTimeout(r, 3000));
-            continue;
-          }
-
-          if (status === 429) {
-            const retryAfter = json?.parameters?.retry_after || 5;
-            console.warn(`[Telegram Bot] ⚠️ Rate limited (429). Telegram requested waiting ${retryAfter}s.`);
-            await new Promise((r) => setTimeout(r, retryAfter * 1000));
-            continue;
-          }
-
-          console.warn(`[Telegram Bot] Notice: Telegram getUpdates returned status [${status}]: ${json?.description || text}`);
-          this.consecutiveErrors++;
-          const backoff = Math.min(15000, 2000 * Math.pow(1.5, this.consecutiveErrors));
-          await new Promise((r) => setTimeout(r, backoff));
+    this.runningLoopPromise = (async () => {
+      while (this.isPolling && this.currentLoopId === loopId) {
+        const token = telegramClient.getActiveToken();
+        if (!token || token.length < 10) {
+          await new Promise((r) => setTimeout(r, 5000));
           continue;
         }
 
-        const data: any = await res.json();
-        this.consecutiveErrors = 0;
+        // If token changed, reset unauthorized and conflict state
+        if (this.lastUnauthorizedToken && token !== this.lastUnauthorizedToken) {
+          this.isTokenUnauthorized = false;
+          this.lastUnauthorizedToken = '';
+          this.consecutiveErrors = 0;
+          this.consecutiveConflicts = 0;
+          this.webhookChecked = false;
+        }
 
-        if (data.ok && Array.isArray(data.result)) {
-          const updates = data.result;
+        // If this token was identified as unauthorized (401), pause polling until updated
+        if (this.isTokenUnauthorized && token === this.lastUnauthorizedToken) {
+          await new Promise((r) => setTimeout(r, 15000));
+          continue;
+        }
 
-          if (updates.length > 0) {
-            console.log(`[Telegram Bot] 📥 Received ${updates.length} update(s) from Telegram.`);
-            for (const update of updates) {
-              const uId = update.update_id;
-              let updateType = 'unknown';
-              let senderInfo = '';
+        // Check webhook status once on start to ensure webhook mode is disabled while preserving pending updates
+        if (!this.webhookChecked) {
+          try {
+            const webhookInfo = await telegramClient.getWebhookInfo(token);
+            if (webhookInfo && webhookInfo.url) {
+              console.log(
+                `[Telegram Bot] Active webhook found (${webhookInfo.url}). Clearing webhook to enable long-polling without losing pending updates...`
+              );
+              await telegramClient.deleteWebhook(false, token);
+              console.log('[Telegram Bot] Webhook deleted successfully.');
+            } else {
+              console.log(
+                `[Telegram Bot] Webhook status verified: clean. Pending updates: ${webhookInfo?.pending_update_count ?? 0}.`
+              );
+            }
+            this.webhookChecked = true;
+          } catch (err: unknown) {
+            const msg = err instanceof Error ? err.message : String(err);
+            console.warn(`[Telegram Bot] Notice during webhook verification: ${msg}`);
+            this.webhookChecked = true;
+          }
+        }
 
-              if (update.message) {
-                const txt = update.message.text ? `"${update.message.text.substring(0, 35)}"` : '(media/attachment)';
-                updateType = `message: ${txt}`;
-                senderInfo = update.message.from?.username
-                  ? `@${update.message.from.username}`
-                  : `id=${update.message.from?.id}`;
-              } else if (update.channel_post) {
-                updateType = `channel_post: ${update.channel_post.chat?.title || update.channel_post.chat?.id}`;
-                senderInfo = `chat_id=${update.channel_post.chat?.id}`;
-              } else if (update.callback_query) {
-                updateType = `callback_query: "${update.callback_query.data}"`;
-                senderInfo = update.callback_query.from?.username
-                  ? `@${update.callback_query.from.username}`
-                  : `id=${update.callback_query.from?.id}`;
-              } else if (update.my_chat_member) {
-                updateType = `my_chat_member`;
-                senderInfo = `chat_id=${update.my_chat_member.chat?.id}`;
+        if (!this.isPolling || this.currentLoopId !== loopId) break;
+
+        try {
+          const payload: any = {
+            timeout: 25,
+            limit: 100,
+            allowed_updates: ['message', 'channel_post', 'callback_query', 'my_chat_member'],
+          };
+          // Advance offset: must be greater by 1 than highest update_id seen
+          if (this.lastUpdateId > 0) {
+            payload.offset = this.lastUpdateId + 1;
+          }
+
+          this.abortController = new AbortController();
+          const currentController = this.abortController;
+          const timeoutId = setTimeout(() => {
+            try {
+              currentController.abort();
+            } catch {}
+          }, 35000); // 25s long-poll + 10s buffer
+
+          let res: Response;
+          try {
+            res = await fetch(`https://api.telegram.org/bot${token}/getUpdates`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(payload),
+              signal: currentController.signal,
+            });
+          } finally {
+            clearTimeout(timeoutId);
+            if (this.abortController === currentController) {
+              this.abortController = null;
+            }
+          }
+
+          if (!this.isPolling || this.currentLoopId !== loopId) break;
+
+          if (!res.ok) {
+            const status = res.status;
+            const text = await res.text();
+            let json: any = null;
+            try {
+              json = JSON.parse(text);
+            } catch {}
+
+            if (status === 401) {
+              this.isTokenUnauthorized = true;
+              this.lastUnauthorizedToken = token;
+              console.warn(
+                `[Telegram Bot] ⚠️ Configured Bot Token is unauthorized or revoked by @BotFather (HTTP 401). Polling paused. Please set a valid TELEGRAM_BOT_TOKEN environment variable or configure in Admin Settings.`
+              );
+              db.logSystem(
+                'warn',
+                'telegram_bot',
+                'Configured Telegram Bot Token returned HTTP 401 Unauthorized. Polling paused until a valid token is provided.'
+              );
+              await new Promise((r) => setTimeout(r, 15000));
+              continue;
+            }
+
+            if (status === 409) {
+              this.consecutiveConflicts++;
+              const desc = json?.description || text || '';
+              const isWebhookConflict = desc.toLowerCase().includes('webhook');
+
+              if (isWebhookConflict) {
+                console.warn('[Telegram Bot] ⚠️ Conflict (409): Webhook active on Telegram. Removing webhook...');
+                try {
+                  await telegramClient.deleteWebhook(false, token);
+                } catch {}
               }
 
-              console.log(`[Telegram Bot] ⚡ Processing update_id=${uId} [type: ${updateType}] from ${senderInfo}`);
+              // Controlled backoff: 5s, 10s, 18s, up to 30s max, with jitter
+              const backoffSec = Math.min(30, Math.max(5, Math.round(5 * Math.pow(1.5, this.consecutiveConflicts - 1))));
+              const jitterMs = Math.floor(Math.random() * 1000);
+              const delayMs = backoffSec * 1000 + jitterMs;
 
-              // Advance highest seen update ID so next request confirms this update to Telegram
-              this.lastUpdateId = Math.max(this.lastUpdateId, uId);
+              console.warn(
+                `[Telegram Bot] ⚠️ Conflict (409): ${desc || 'Webhook active or duplicate getUpdates'}. Waiting ${backoffSec}s before retrying (conflict #${this.consecutiveConflicts})...`
+              );
 
-              try {
-                await this.handleUpdate(update, true);
-              } catch (err: unknown) {
-                const msg = err instanceof Error ? err.message : String(err);
-                console.error(`[Telegram Bot] ❌ Error executing handleUpdate for update_id=${uId}:`, msg);
+              await new Promise((r) => setTimeout(r, delayMs));
+              continue;
+            }
+
+            if (status === 429) {
+              const retryAfter = json?.parameters?.retry_after || 5;
+              console.warn(`[Telegram Bot] ⚠️ Rate limited (429). Telegram requested waiting ${retryAfter}s.`);
+              await new Promise((r) => setTimeout(r, retryAfter * 1000));
+              continue;
+            }
+
+            console.warn(`[Telegram Bot] Notice: Telegram getUpdates returned status [${status}]: ${json?.description || text}`);
+            this.consecutiveErrors++;
+            const backoff = Math.min(15000, 2000 * Math.pow(1.5, this.consecutiveErrors));
+            await new Promise((r) => setTimeout(r, backoff));
+            continue;
+          }
+
+          const data: any = await res.json();
+          this.consecutiveErrors = 0;
+          this.consecutiveConflicts = 0;
+
+          if (data.ok && Array.isArray(data.result)) {
+            const updates = data.result;
+
+            if (updates.length > 0) {
+              console.log(`[Telegram Bot] 📥 Received ${updates.length} update(s) from Telegram.`);
+              for (const update of updates) {
+                if (!this.isPolling || this.currentLoopId !== loopId) break;
+
+                const uId = update.update_id;
+                let updateType = 'unknown';
+                let senderInfo = '';
+
+                if (update.message) {
+                  const txt = update.message.text ? `"${update.message.text.substring(0, 35)}"` : '(media/attachment)';
+                  updateType = `message: ${txt}`;
+                  senderInfo = update.message.from?.username
+                    ? `@${update.message.from.username}`
+                    : `id=${update.message.from?.id}`;
+                } else if (update.channel_post) {
+                  updateType = `channel_post: ${update.channel_post.chat?.title || update.channel_post.chat?.id}`;
+                  senderInfo = `chat_id=${update.channel_post.chat?.id}`;
+                } else if (update.callback_query) {
+                  updateType = `callback_query: "${update.callback_query.data}"`;
+                  senderInfo = update.callback_query.from?.username
+                    ? `@${update.callback_query.from.username}`
+                    : `id=${update.callback_query.from?.id}`;
+                } else if (update.my_chat_member) {
+                  updateType = `my_chat_member`;
+                  senderInfo = `chat_id=${update.my_chat_member.chat?.id}`;
+                }
+
+                // Requirement 7: log update_id when an update is actually received
+                console.log(`[Telegram Bot] ⚡ Processing update_id=${uId} [type: ${updateType}] from ${senderInfo}`);
+
+                // Advance highest seen update ID so next request confirms this update to Telegram
+                this.lastUpdateId = Math.max(this.lastUpdateId, uId);
+
+                try {
+                  await this.handleUpdate(update, true);
+                } catch (err: unknown) {
+                  const msg = err instanceof Error ? err.message : String(err);
+                  console.error(`[Telegram Bot] ❌ Error executing handleUpdate for update_id=${uId}:`, msg);
+                }
               }
             }
           }
-        }
 
-        // Loop immediately for real-time responsiveness
-        await new Promise((r) => setTimeout(r, 100));
-      } catch (err: unknown) {
-        const error = err as any;
-        if (error?.name === 'AbortError') {
-          // Timeout on fetch - standard completion of a 25s long poll when no updates occurred
-          continue;
-        }
+          // Loop immediately for real-time responsiveness
+          await new Promise((r) => setTimeout(r, 100));
+        } catch (err: unknown) {
+          if (!this.isPolling || this.currentLoopId !== loopId) break;
 
-        const msg = err instanceof Error ? err.message : String(err);
-        this.consecutiveErrors++;
-        const backoff = Math.min(15000, 1000 * Math.pow(1.5, this.consecutiveErrors));
-        console.warn(`[Telegram Bot] ⚠️ Polling network pause (${msg}). Re-polling in ${Math.round(backoff / 1000)}s...`);
-        await new Promise((r) => setTimeout(r, backoff));
+          const error = err as any;
+          if (error?.name === 'AbortError') {
+            // Timeout on fetch - standard completion of a 25s long poll when no updates occurred
+            continue;
+          }
+
+          const msg = err instanceof Error ? err.message : String(err);
+          this.consecutiveErrors++;
+          const backoff = Math.min(15000, 1000 * Math.pow(1.5, this.consecutiveErrors));
+          console.warn(`[Telegram Bot] ⚠️ Polling network pause (${msg}). Re-polling in ${Math.round(backoff / 1000)}s...`);
+          await new Promise((r) => setTimeout(r, backoff));
+        }
       }
-    }
 
-    this.pollingLoopRunning = false;
+      this.pollingLoopRunning = false;
+      const globalAny = globalThis as any;
+      if (globalAny[GLOBAL_POLLING_LOCK_KEY]?.loopId === loopId) {
+        delete globalAny[GLOBAL_POLLING_LOCK_KEY];
+      }
+    })();
+
+    await this.runningLoopPromise;
   }
 
   private async handleText(user: BotUser, text: string): Promise<TelegramMessageResponse> {
@@ -926,4 +1015,12 @@ export class TelegramBotHandler {
   }
 }
 
-export const telegramBot = new TelegramBotHandler();
+const getGlobalTelegramBot = (): TelegramBotHandler => {
+  const globalAny = globalThis as any;
+  if (!globalAny[GLOBAL_BOT_HANDLER_KEY]) {
+    globalAny[GLOBAL_BOT_HANDLER_KEY] = new TelegramBotHandler();
+  }
+  return globalAny[GLOBAL_BOT_HANDLER_KEY];
+};
+
+export const telegramBot = getGlobalTelegramBot();

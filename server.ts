@@ -32,7 +32,14 @@ const requireAdmin = (req: express.Request, res: express.Response, next: express
   next();
 };
 
+let isServerStarted = false;
+
 async function startServer() {
+  if (isServerStarted) {
+    return;
+  }
+  isServerStarted = true;
+
   const app = express();
   app.use(express.json());
 
@@ -713,8 +720,9 @@ async function startServer() {
   // --- Vite / Static Handling ---
   const distPath = path.join(process.cwd(), 'dist');
   const hasDist = fs.existsSync(path.join(distPath, 'index.html'));
+  const isProd = process.env.NODE_ENV === 'production' || hasDist;
 
-  if (process.env.NODE_ENV === 'production' && hasDist) {
+  if (isProd && hasDist) {
     app.use(express.static(distPath));
     app.get('*', (req, res) => {
       res.sendFile(path.join(distPath, 'index.html'));
@@ -728,11 +736,30 @@ async function startServer() {
     app.use(vite.middlewares);
   }
 
-  app.listen(PORT, '0.0.0.0', () => {
+  const server = app.listen(PORT, '0.0.0.0', () => {
     console.log(`[X2Telegram Server] Running on http://0.0.0.0:${PORT}`);
     sourceMonitor.start();
     telegramBot.startPolling();
   });
+
+  // Graceful shutdown handling to clean up Telegram polling connection and avoid 409 conflict on restarts
+  const gracefulShutdown = async (signal: string) => {
+    console.log(`[X2Telegram Server] Received ${signal}. Stopping background workers...`);
+    try {
+      sourceMonitor.stop();
+    } catch {}
+    try {
+      await telegramBot.stopPolling();
+    } catch {}
+    server.close(() => {
+      console.log('[X2Telegram Server] HTTP server closed.');
+      process.exit(0);
+    });
+    setTimeout(() => process.exit(0), 5000).unref();
+  };
+
+  process.once('SIGINT', () => gracefulShutdown('SIGINT'));
+  process.once('SIGTERM', () => gracefulShutdown('SIGTERM'));
 }
 
 startServer();
