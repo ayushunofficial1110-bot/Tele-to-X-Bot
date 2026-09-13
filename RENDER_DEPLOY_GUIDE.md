@@ -18,7 +18,7 @@
 | **Region** | `Oregon (US West)` या `Frankfurt (EU)` |
 | **Branch** | `main` |
 | **Build Command** | `npm install && npm run build` |
-| **Start Command** | `npm start` |
+| **Start Command** | `node server.js` |
 | **Instance Type** | `Free` (या Starter) |
 
 ---

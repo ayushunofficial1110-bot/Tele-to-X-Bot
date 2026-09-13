@@ -19,13 +19,55 @@
         "xCredentials": {}
       },
       "createdAt": "2026-09-12T19:07:23.394Z",
-      "lastActiveAt": "2026-09-12T19:23:39.989Z"
+      "lastActiveAt": "2026-09-13T09:06:13.456Z"
     }
   ],
   "automations": [],
   "posts": [],
   "otherBots": [],
   "systemLogs": [
+    {
+      "id": "syslog_1789290741406_9kh",
+      "timestamp": "2026-09-13T09:12:21.406Z",
+      "level": "info",
+      "source": "telegram_bot",
+      "message": "Telegram Bot long-polling worker started."
+    },
+    {
+      "id": "syslog_1789290741392_c7w",
+      "timestamp": "2026-09-13T09:12:21.392Z",
+      "level": "info",
+      "source": "mongodb",
+      "message": "MONGODB_URI not configured. Operating in persistent file-backed mode (data/db.json)."
+    },
+    {
+      "id": "syslog_1789290735970_yzt",
+      "timestamp": "2026-09-13T09:12:15.970Z",
+      "level": "info",
+      "source": "telegram_bot",
+      "message": "Telegram Bot long-polling worker started."
+    },
+    {
+      "id": "syslog_1789290735564_stf",
+      "timestamp": "2026-09-13T09:12:15.564Z",
+      "level": "info",
+      "source": "mongodb",
+      "message": "MONGODB_URI not configured. Operating in persistent file-backed mode (data/db.json)."
+    },
+    {
+      "id": "syslog_1789288611167_8qz",
+      "timestamp": "2026-09-13T08:36:51.167Z",
+      "level": "info",
+      "source": "telegram_bot",
+      "message": "Telegram Bot long-polling worker started."
+    },
+    {
+      "id": "syslog_1789288610834_lob",
+      "timestamp": "2026-09-13T08:36:50.834Z",
+      "level": "info",
+      "source": "mongodb",
+      "message": "MONGODB_URI not configured. Operating in persistent file-backed mode (data/db.json)."
+    },
     {
       "id": "syslog_1789240370782_0bv",
       "timestamp": "2026-09-12T19:12:50.782Z",

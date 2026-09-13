@@ -1,7 +1,6 @@
 import express from 'express';
 import path from 'path';
 import fs from 'fs';
-import { createServer as createViteServer } from 'vite';
 import { db } from './server/db.ts';
 import { telegramBot } from './server/telegramBot.ts';
 import { telegramClient, parseTelegramChannelInput } from './server/telegramClient.ts';
@@ -695,6 +694,7 @@ async function startServer() {
       res.sendFile(path.join(distPath, 'index.html'));
     });
   } else {
+    const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: 'spa',

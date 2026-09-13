@@ -2,260 +2,108 @@
 import express from "express";
 import path2 from "path";
 import fs2 from "fs";
-import { createServer as createViteServer } from "vite";
 
 // server/db.ts
 import fs from "fs";
 import path from "path";
+import crypto from "node:crypto";
+import { MongoClient } from "mongodb";
 var DATA_DIR = path.join(process.cwd(), "data");
 var DB_FILE = path.join(DATA_DIR, "db.json");
 var startTime = Date.now();
 var DEFAULT_SETTINGS = {
   botToken: process.env.TELEGRAM_BOT_TOKEN || "",
-  botUsername: "X2TelegramAutoBot",
-  webhookUrl: `${process.env.APP_URL || "https://my-app.run.app"}/api/telegram/webhook`,
+  botUsername: "X2TelegramBot",
+  webhookUrl: `${process.env.APP_URL || "http://localhost:3000"}/api/telegram/webhook`,
   isWebhookActive: false,
-  adminSecret: process.env.ADMIN_KEY || "admin_secret_key",
+  adminSecret: process.env.ADMIN_KEY || "",
   autoProcessSampleQueue: true
 };
-var DEFAULT_OTHER_BOTS = [
-  {
-    id: "bot_crypto_whale",
-    name: "CryptoWhale Alert",
-    username: "@CryptoWhaleTrackerBot",
-    description: "Instant alerts on large on-chain transactions, exchange inflows, and token movements across 12 blockchains.",
-    category: "Crypto & Trading",
-    url: "https://t.me/CryptoWhaleTrackerBot",
-    icon: "\u{1F40B}",
-    badge: "Trending",
-    enabled: true,
-    clicksCount: 1420,
-    order: 1,
-    createdAt: new Date(Date.now() - 30 * 864e5).toISOString()
-  },
-  {
-    id: "bot_ai_summarizer",
-    name: "OmniAI Article Reader",
-    username: "@OmniArticleReaderBot",
-    description: "Forward any paywalled or long article URL to get a 30-second bulleted executive summary directly in Telegram.",
-    category: "Productivity",
-    url: "https://t.me/OmniArticleReaderBot",
-    icon: "\u26A1",
-    badge: "Popular",
-    enabled: true,
-    clicksCount: 2890,
-    order: 2,
-    createdAt: new Date(Date.now() - 45 * 864e5).toISOString()
-  },
-  {
-    id: "bot_social_scheduler",
-    name: "PostPilot Social Scheduler",
-    username: "@PostPilotSchedulerBot",
-    description: "Schedule broadcasts, format rich Telegram markdown polls, and preview visual media threads before publishing.",
-    category: "Marketing",
-    url: "https://t.me/PostPilotSchedulerBot",
-    icon: "\u{1F4C5}",
-    enabled: true,
-    clicksCount: 934,
-    order: 3,
-    createdAt: new Date(Date.now() - 15 * 864e5).toISOString()
-  },
-  {
-    id: "bot_rss_feed",
-    name: "FeedMatrix Instant RSS",
-    username: "@FeedMatrixBot",
-    description: "Subscribe to any RSS, YouTube, or Substack publication and receive real-time updates directly in your private channels.",
-    category: "News & Media",
-    url: "https://t.me/FeedMatrixBot",
-    icon: "\u{1F4F0}",
-    enabled: true,
-    clicksCount: 651,
-    order: 4,
-    createdAt: new Date(Date.now() - 10 * 864e5).toISOString()
-  }
-];
-var DEFAULT_USERS = [
-  {
-    id: "user_alice_tech",
-    telegramId: "78291041",
-    telegramUsername: "@alice_tech",
-    firstName: "Alice Chen",
-    plan: "pro",
-    postsProcessedCount: 42,
-    postsFailedCount: 1,
-    postsFilteredAdsCount: 8,
-    status: "active",
-    settings: {
-      autoRewrite: true,
-      adFilterEnabled: true,
-      preserveFactsStrict: true,
-      defaultPostFormat: "auto",
-      xCredentials: {
-        accountHandle: "@alicewriter",
-        bearerToken: "x_sec_bearer_alice_sample"
-      },
-      telegramChannelId: "@tech_pulse_daily"
-    },
-    createdAt: new Date(Date.now() - 12 * 864e5).toISOString(),
-    lastActiveAt: (/* @__PURE__ */ new Date()).toISOString()
-  },
-  {
-    id: "user_bob_crypto",
-    telegramId: "99201488",
-    telegramUsername: "@bob_crypto",
-    firstName: "Bob Martinez",
-    plan: "free",
-    postsProcessedCount: 19,
-    postsFailedCount: 0,
-    postsFilteredAdsCount: 14,
-    status: "active",
-    settings: {
-      autoRewrite: true,
-      adFilterEnabled: true,
-      preserveFactsStrict: true,
-      defaultPostFormat: "thread",
-      xCredentials: {
-        accountHandle: "@bob_defi"
-      },
-      telegramChannelId: "@crypto_insider_signals"
-    },
-    createdAt: new Date(Date.now() - 5 * 864e5).toISOString(),
-    lastActiveAt: (/* @__PURE__ */ new Date()).toISOString()
-  }
-];
-var DEFAULT_AUTOMATIONS = [
-  {
-    id: "auto_alice_01",
-    userId: "user_alice_tech",
-    name: "X (@OpenAI) \u2794 @tech_pulse_daily",
-    direction: "x_to_telegram",
-    source: "@OpenAI",
-    destination: "@tech_pulse_daily",
-    status: "active",
-    settings: {
-      filterPromotions: true,
-      autoRewrite: true,
-      format: "auto",
-      includeMedia: true,
-      includeOriginalLink: true,
-      preserveHashtags: true
-    },
-    stats: {
-      processedCount: 28,
-      skippedAdsCount: 2,
-      failedCount: 0,
-      lastRunAt: new Date(Date.now() - 15 * 6e4).toISOString()
-    },
-    lastSeenPostId: "1839201948271049281",
-    createdAt: new Date(Date.now() - 10 * 864e5).toISOString(),
-    updatedAt: (/* @__PURE__ */ new Date()).toISOString()
-  },
-  {
-    id: "auto_alice_02",
-    userId: "user_alice_tech",
-    name: "@tech_pulse_daily \u2794 X (@alicewriter)",
-    direction: "telegram_to_x",
-    source: "@tech_pulse_daily",
-    destination: "@alicewriter",
-    status: "active",
-    settings: {
-      filterPromotions: true,
-      autoRewrite: true,
-      format: "thread",
-      includeMedia: true,
-      includeOriginalLink: false,
-      preserveHashtags: true
-    },
-    stats: {
-      processedCount: 14,
-      skippedAdsCount: 0,
-      failedCount: 1,
-      lastRunAt: new Date(Date.now() - 60 * 6e4).toISOString()
-    },
-    lastSeenPostId: "msg_98214",
-    createdAt: new Date(Date.now() - 8 * 864e5).toISOString(),
-    updatedAt: (/* @__PURE__ */ new Date()).toISOString()
-  },
-  {
-    id: "auto_bob_01",
-    userId: "user_bob_crypto",
-    name: "X (@VitalikButerin) \u2794 @crypto_insider_signals",
-    direction: "x_to_telegram",
-    source: "@VitalikButerin",
-    destination: "@crypto_insider_signals",
-    status: "active",
-    settings: {
-      filterPromotions: true,
-      autoRewrite: true,
-      format: "concise",
-      includeMedia: true,
-      includeOriginalLink: true,
-      preserveHashtags: false
-    },
-    stats: {
-      processedCount: 19,
-      skippedAdsCount: 14,
-      failedCount: 0,
-      lastRunAt: new Date(Date.now() - 40 * 6e4).toISOString()
-    },
-    lastSeenPostId: "1839109283746152431",
-    createdAt: new Date(Date.now() - 5 * 864e5).toISOString(),
-    updatedAt: (/* @__PURE__ */ new Date()).toISOString()
-  }
-];
-var DEFAULT_POSTS = [
-  {
-    id: "post_log_101",
-    userId: "user_alice_tech",
-    automationId: "auto_alice_01",
-    direction: "x_to_telegram",
-    sourcePostId: "1839201948271049281",
-    sourceAuthor: "@OpenAI",
-    sourceContent: "Introducing our newest reasoning models for complex mathematics, coding, and scientific benchmark evaluation. Available today in preview.",
-    sourceUrl: "https://x.com/OpenAI/status/1839201948271049281",
-    media: [
-      {
-        type: "image",
-        url: "https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=800&auto=format&fit=crop&q=80"
-      }
-    ],
-    processedContent: "\u{1F9E0} OpenAI has released its latest family of reasoning models, engineered specifically for advanced mathematics, software engineering, and scientific benchmarks. The models are available starting today in preview.\n\n\u{1F517} Original: https://x.com/OpenAI/status/1839201948271049281",
-    isAd: false,
-    adConfidence: 0.05,
-    adReasoning: "Official product release announcement from verified source without affiliate links or promotional coupon markers.",
-    adCategory: "organic",
-    status: "published",
-    attempts: 1,
-    maxAttempts: 3,
-    publishedAt: new Date(Date.now() - 15 * 6e4).toISOString(),
-    createdAt: new Date(Date.now() - 16 * 6e4).toISOString()
-  },
-  {
-    id: "post_log_102",
-    userId: "user_alice_tech",
-    automationId: "auto_alice_01",
-    direction: "x_to_telegram",
-    sourcePostId: "1839201948271049299",
-    sourceAuthor: "@OpenAI_Affiliate_Bot",
-    sourceContent: "URGENT: Win $10,000 in free AI credits! Click t.co/freecredit token presale ends in 2 hours! \u{1F680}\u{1F680} #ad",
-    sourceUrl: "https://x.com/fake/status/1839201948271049299",
-    media: [],
-    processedContent: "[Blocked Ad Content]",
-    isAd: true,
-    adConfidence: 0.98,
-    adReasoning: "Detected high-confidence spam markers: token presale, urgency claims, suspicious shortlink, and explicit #ad tag.",
-    adCategory: "crypto_shill",
-    status: "filtered_ad",
-    attempts: 0,
-    maxAttempts: 3,
-    createdAt: new Date(Date.now() - 45 * 6e4).toISOString()
-  }
-];
+function computeContentHash(content, urls = []) {
+  const normalizedText = content.toLowerCase().replace(/https?:\/\/[^\s]+/g, "").replace(/[^a-z0-9]/g, "").slice(0, 300);
+  const normalizedUrls = [...urls].map((u) => u.toLowerCase().trim().replace(/https?:\/\/(www\.)?/, "")).sort().join("|");
+  return crypto.createHash("sha256").update(`${normalizedText}::${normalizedUrls}`).digest("hex");
+}
 var Database = class {
   constructor() {
-    this.data = this.load();
+    this.mongoClient = null;
+    this.mongoDb = null;
+    this.isMongoConnected = false;
+    this.data = this.loadLocal();
+    this.initMongo();
   }
-  load() {
+  /**
+   * Initializes real MongoDB connection if MONGODB_URI is provided.
+   */
+  async initMongo() {
+    const mongoUri = process.env.MONGODB_URI || process.env.MONGO_URI || process.env.MONGODB_URL;
+    if (!mongoUri) {
+      this.logSystem(
+        "info",
+        "mongodb",
+        "MONGODB_URI not configured. Operating in persistent file-backed mode (data/db.json)."
+      );
+      return;
+    }
+    try {
+      this.mongoClient = new MongoClient(mongoUri, {
+        connectTimeoutMS: 8e3,
+        serverSelectionTimeoutMS: 8e3
+      });
+      await this.mongoClient.connect();
+      this.mongoDb = this.mongoClient.db("x2telegram");
+      this.isMongoConnected = true;
+      const maskedUri = mongoUri.replace(/\/\/([^:]+):([^@]+)@/, "//$1:****@");
+      this.logSystem("success", "mongodb", `Connected to real MongoDB instance: ${maskedUri}`);
+      await Promise.all([
+        this.mongoDb.collection("users").createIndex({ id: 1 }, { unique: true }),
+        this.mongoDb.collection("users").createIndex({ telegramId: 1 }, { unique: true }),
+        this.mongoDb.collection("users").createIndex({ authToken: 1 }),
+        this.mongoDb.collection("automations").createIndex({ id: 1 }, { unique: true }),
+        this.mongoDb.collection("automations").createIndex({ userId: 1 }),
+        this.mongoDb.collection("posts").createIndex({ id: 1 }, { unique: true }),
+        this.mongoDb.collection("posts").createIndex({ automationId: 1, sourcePostId: 1 }),
+        this.mongoDb.collection("posts").createIndex({ contentHash: 1 }),
+        this.mongoDb.collection("other_bots").createIndex({ id: 1 }, { unique: true })
+      ]);
+      await this.hydrateFromMongo();
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      this.isMongoConnected = false;
+      this.logSystem(
+        "warn",
+        "mongodb",
+        `Could not connect to MongoDB (${msg}). Falling back to persistent local storage.`
+      );
+    }
+  }
+  async hydrateFromMongo() {
+    if (!this.mongoDb) return;
+    try {
+      const [users, automations, posts, otherBots, settingsDoc] = await Promise.all([
+        this.mongoDb.collection("users").find({}).toArray(),
+        this.mongoDb.collection("automations").find({}).toArray(),
+        this.mongoDb.collection("posts").find({}).limit(500).sort({ createdAt: -1 }).toArray(),
+        this.mongoDb.collection("other_bots").find({}).sort({ order: 1 }).toArray(),
+        this.mongoDb.collection("settings").findOne({ _id: "global" })
+      ]);
+      if (users.length > 0) this.data.users = users;
+      if (automations.length > 0) this.data.automations = automations;
+      if (posts.length > 0) this.data.posts = posts;
+      if (otherBots.length > 0) this.data.otherBots = otherBots;
+      if (settingsDoc?.settings) this.data.settings = { ...DEFAULT_SETTINGS, ...settingsDoc.settings };
+      this.persistLocal();
+      this.logSystem(
+        "info",
+        "mongodb",
+        `Hydrated from MongoDB: ${this.data.users.length} users, ${this.data.automations.length} automations, ${this.data.otherBots.length} bots.`
+      );
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      this.logSystem("error", "mongodb", `Failed to hydrate data from MongoDB: ${msg}`);
+    }
+  }
+  loadLocal() {
     try {
       if (!fs.existsSync(DATA_DIR)) {
         fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -264,37 +112,37 @@ var Database = class {
         const raw = fs.readFileSync(DB_FILE, "utf-8");
         const parsed = JSON.parse(raw);
         return {
-          users: parsed.users || DEFAULT_USERS,
-          automations: parsed.automations || DEFAULT_AUTOMATIONS,
-          posts: parsed.posts || DEFAULT_POSTS,
-          otherBots: parsed.otherBots || DEFAULT_OTHER_BOTS,
-          systemLogs: parsed.systemLogs || [],
+          users: Array.isArray(parsed.users) ? parsed.users : [],
+          automations: Array.isArray(parsed.automations) ? parsed.automations : [],
+          posts: Array.isArray(parsed.posts) ? parsed.posts : [],
+          otherBots: Array.isArray(parsed.otherBots) ? parsed.otherBots : [],
+          systemLogs: Array.isArray(parsed.systemLogs) ? parsed.systemLogs : [],
           settings: { ...DEFAULT_SETTINGS, ...parsed.settings || {} }
         };
       }
     } catch (err) {
-      console.error("[DB] Failed to read database file, initializing defaults:", err);
+      console.error("[DB] Failed to read database file, initializing clean database:", err);
     }
     const initial = {
-      users: DEFAULT_USERS,
-      automations: DEFAULT_AUTOMATIONS,
-      posts: DEFAULT_POSTS,
-      otherBots: DEFAULT_OTHER_BOTS,
+      users: [],
+      automations: [],
+      posts: [],
+      otherBots: [],
       systemLogs: [
         {
           id: "log_init",
           timestamp: (/* @__PURE__ */ new Date()).toISOString(),
           level: "info",
           source: "engine",
-          message: "System database initialized with multi-tenant SaaS schema."
+          message: "Public Multi-User Bot Engine initialized with isolated tenancy."
         }
       ],
       settings: DEFAULT_SETTINGS
     };
-    this.saveData(initial);
+    this.saveLocalData(initial);
     return initial;
   }
-  saveData(dataToSave) {
+  saveLocalData(dataToSave) {
     try {
       if (!fs.existsSync(DATA_DIR)) {
         fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -306,8 +154,43 @@ var Database = class {
       console.error("[DB] Failed to persist data to disk:", err);
     }
   }
-  persist() {
-    this.saveData(this.data);
+  persistLocal() {
+    this.saveLocalData(this.data);
+  }
+  // --- Owner & Personal Bot Settings ---
+  getOwner() {
+    let owner = this.data.users[0];
+    if (!owner) {
+      owner = {
+        id: "owner_personal",
+        telegramId: process.env.OWNER_TELEGRAM_ID || "10000001",
+        telegramUsername: "@owner",
+        firstName: "Owner",
+        authToken: `tga_owner_${crypto.randomBytes(8).toString("hex")}`,
+        plan: "enterprise",
+        postsProcessedCount: 0,
+        postsFailedCount: 0,
+        postsFilteredAdsCount: 0,
+        status: "active",
+        settings: {
+          autoRewrite: true,
+          adFilterEnabled: true,
+          preserveFactsStrict: true,
+          defaultPostFormat: "auto",
+          xCredentials: {
+            bearerToken: process.env.TWITTER_BEARER_TOKEN || "",
+            apiKey: process.env.TWITTER_CLIENT_ID || "",
+            apiSecret: process.env.TWITTER_CLIENT_SECRET || ""
+          },
+          telegramChannelId: process.env.TELEGRAM_CHANNEL_ID || ""
+        },
+        createdAt: (/* @__PURE__ */ new Date()).toISOString(),
+        lastActiveAt: (/* @__PURE__ */ new Date()).toISOString()
+      };
+      this.data.users.push(owner);
+      this.persistLocal();
+    }
+    return owner;
   }
   // --- Users ---
   getUsers() {
@@ -318,17 +201,27 @@ var Database = class {
       (u) => u.id === userIdOrTgId || u.telegramId === userIdOrTgId || u.telegramUsername.toLowerCase() === userIdOrTgId.toLowerCase()
     );
   }
+  getUserByToken(authToken) {
+    if (!authToken) return void 0;
+    return this.data.users.find((u) => u.authToken === authToken);
+  }
   upsertUser(user) {
+    if (!user.authToken) {
+      user.authToken = `tga_${user.telegramId}_${crypto.randomBytes(8).toString("hex")}`;
+    }
     const idx = this.data.users.findIndex((u) => u.id === user.id || u.telegramId === user.telegramId);
     if (idx >= 0) {
       this.data.users[idx] = { ...this.data.users[idx], ...user, lastActiveAt: (/* @__PURE__ */ new Date()).toISOString() };
     } else {
       this.data.users.push(user);
     }
-    this.persist();
+    this.persistLocal();
+    if (this.isMongoConnected && this.mongoDb) {
+      this.mongoDb.collection("users").updateOne({ id: user.id }, { $set: user }, { upsert: true }).catch((err) => console.error("[Mongo] upsertUser error:", err));
+    }
     return user;
   }
-  // --- Automations (Strict user isolation) ---
+  // --- Automations ---
   getAutomations(userId) {
     return this.data.automations.filter((a) => a.userId === userId);
   }
@@ -338,102 +231,133 @@ var Database = class {
   getAutomation(id, userId) {
     return this.data.automations.find((a) => a.id === id && (!userId || a.userId === userId));
   }
-  createAutomation(automation) {
-    this.data.automations.push(automation);
-    this.persist();
-    this.logSystem("info", "engine", `Created automation ${automation.name} for user ${automation.userId}`, automation.userId);
-    return automation;
+  createAutomation(auto) {
+    this.data.automations.push(auto);
+    this.persistLocal();
+    if (this.isMongoConnected && this.mongoDb) {
+      this.mongoDb.collection("automations").insertOne(auto).catch((err) => console.error("[Mongo] createAutomation error:", err));
+    }
+    return auto;
   }
   updateAutomation(id, userId, patch) {
     const idx = this.data.automations.findIndex((a) => a.id === id && a.userId === userId);
-    if (idx === -1) return void 0;
-    this.data.automations[idx] = {
-      ...this.data.automations[idx],
-      ...patch,
-      updatedAt: (/* @__PURE__ */ new Date()).toISOString()
-    };
-    this.persist();
-    return this.data.automations[idx];
+    if (idx >= 0) {
+      this.data.automations[idx] = {
+        ...this.data.automations[idx],
+        ...patch,
+        updatedAt: (/* @__PURE__ */ new Date()).toISOString()
+      };
+      const updated = this.data.automations[idx];
+      this.persistLocal();
+      if (this.isMongoConnected && this.mongoDb) {
+        this.mongoDb.collection("automations").updateOne({ id, userId }, { $set: patch }).catch((err) => console.error("[Mongo] updateAutomation error:", err));
+      }
+      return updated;
+    }
+    return void 0;
   }
   deleteAutomation(id, userId) {
-    const initialLen = this.data.automations.length;
+    const initLen = this.data.automations.length;
     this.data.automations = this.data.automations.filter((a) => !(a.id === id && a.userId === userId));
-    const changed = this.data.automations.length < initialLen;
+    const changed = this.data.automations.length !== initLen;
     if (changed) {
-      this.persist();
-      this.logSystem("info", "engine", `Deleted automation ${id} for user ${userId}`, userId);
+      this.persistLocal();
+      if (this.isMongoConnected && this.mongoDb) {
+        this.mongoDb.collection("automations").deleteOne({ id, userId }).catch((err) => console.error("[Mongo] deleteAutomation error:", err));
+      }
     }
     return changed;
   }
-  // --- Posts & Activity Logs ---
-  addPostLog(post) {
-    this.data.posts.unshift(post);
-    if (this.data.posts.length > 1e3) {
-      this.data.posts = this.data.posts.slice(0, 1e3);
-    }
-    const user = this.data.users.find((u) => u.id === post.userId);
-    if (user) {
-      if (post.status === "published") user.postsProcessedCount++;
-      if (post.status === "failed") user.postsFailedCount++;
-      if (post.status === "filtered_ad") user.postsFilteredAdsCount++;
-      user.lastActiveAt = (/* @__PURE__ */ new Date()).toISOString();
-    }
-    const auto = this.data.automations.find((a) => a.id === post.automationId);
-    if (auto) {
-      if (post.status === "published") auto.stats.processedCount++;
-      if (post.status === "failed") auto.stats.failedCount++;
-      if (post.status === "filtered_ad") auto.stats.skippedAdsCount++;
-      auto.stats.lastRunAt = (/* @__PURE__ */ new Date()).toISOString();
-    }
-    this.persist();
-    return post;
-  }
+  // --- Post Logs & Strict Deduplication ---
   getPostLogs(userId, limit = 50) {
-    const filtered = userId ? this.data.posts.filter((p) => p.userId === userId) : this.data.posts;
-    return filtered.slice(0, limit);
+    const list = userId ? this.data.posts.filter((p) => p.userId === userId) : this.data.posts;
+    return list.slice(0, limit);
+  }
+  addPostLog(log) {
+    if (!log.contentHash) {
+      const urls = log.sourceContent.match(/https?:\/\/[^\s]+/g) || [];
+      log.contentHash = computeContentHash(log.sourceContent, urls);
+    }
+    this.data.posts.unshift(log);
+    if (this.data.posts.length > 500) {
+      this.data.posts = this.data.posts.slice(0, 500);
+    }
+    this.persistLocal();
+    if (this.isMongoConnected && this.mongoDb) {
+      this.mongoDb.collection("posts").insertOne(log).catch((err) => console.error("[Mongo] addPostLog error:", err));
+    }
+    const user = this.getUser(log.userId);
+    if (user) {
+      if (log.status === "published") {
+        user.postsProcessedCount = (user.postsProcessedCount || 0) + 1;
+      } else if (log.status === "filtered_ad") {
+        user.postsFilteredAdsCount = (user.postsFilteredAdsCount || 0) + 1;
+      } else if (log.status === "failed") {
+        user.postsFailedCount = (user.postsFailedCount || 0) + 1;
+      }
+      this.upsertUser(user);
+    }
+    return log;
   }
   isPostProcessed(automationId, sourcePostId) {
     return this.data.posts.some(
-      (p) => p.automationId === automationId && p.sourcePostId === sourcePostId && p.status === "published"
+      (p) => p.automationId === automationId && p.sourcePostId === sourcePostId
     );
   }
-  // --- Other Bots Management ---
+  isContentDuplicate(automationId, content) {
+    const urls = content.match(/https?:\/\/[^\s]+/g) || [];
+    const hash = computeContentHash(content, urls);
+    return this.data.posts.some(
+      (p) => p.automationId === automationId && p.contentHash === hash && p.status === "published"
+    );
+  }
+  // --- Other Bots (Configured by Admin) ---
   getOtherBots(onlyEnabled = true) {
     const list = onlyEnabled ? this.data.otherBots.filter((b) => b.enabled) : this.data.otherBots;
-    return list.sort((a, b) => a.order - b.order);
+    return [...list].sort((a, b) => a.order - b.order);
+  }
+  getOtherBot(id) {
+    return this.data.otherBots.find((b) => b.id === id);
   }
   upsertOtherBot(bot) {
     const idx = this.data.otherBots.findIndex((b) => b.id === bot.id);
     if (idx >= 0) {
-      this.data.otherBots[idx] = { ...this.data.otherBots[idx], ...bot };
+      this.data.otherBots[idx] = { ...bot, updatedAt: (/* @__PURE__ */ new Date()).toISOString() };
     } else {
       this.data.otherBots.push(bot);
     }
-    this.persist();
-    this.logSystem("info", "api", `Updated 'Other Bots' entry: ${bot.name} (${bot.username})`);
+    this.persistLocal();
+    if (this.isMongoConnected && this.mongoDb) {
+      this.mongoDb.collection("other_bots").updateOne({ id: bot.id }, { $set: bot }, { upsert: true }).catch((err) => console.error("[Mongo] upsertOtherBot error:", err));
+    }
     return bot;
   }
   deleteOtherBot(id) {
     const initLen = this.data.otherBots.length;
     this.data.otherBots = this.data.otherBots.filter((b) => b.id !== id);
-    if (this.data.otherBots.length < initLen) {
-      this.persist();
-      this.logSystem("info", "api", `Deleted 'Other Bots' entry ${id}`);
-      return true;
+    const changed = this.data.otherBots.length !== initLen;
+    if (changed) {
+      this.persistLocal();
+      if (this.isMongoConnected && this.mongoDb) {
+        this.mongoDb.collection("other_bots").deleteOne({ id }).catch((err) => console.error("[Mongo] deleteOtherBot error:", err));
+      }
     }
-    return false;
+    return changed;
   }
   recordBotClick(id) {
     const bot = this.data.otherBots.find((b) => b.id === id);
     if (bot) {
       bot.clicksCount = (bot.clicksCount || 0) + 1;
-      this.persist();
+      this.persistLocal();
+      if (this.isMongoConnected && this.mongoDb) {
+        this.mongoDb.collection("other_bots").updateOne({ id }, { $inc: { clicksCount: 1 } }).catch((err) => console.error("[Mongo] recordBotClick error:", err));
+      }
     }
   }
   // --- System Logs ---
   logSystem(level, source, message, userId, metadata) {
-    const logItem = {
-      id: `log_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+    const log = {
+      id: `syslog_${Date.now()}_${Math.random().toString(36).substring(2, 5)}`,
       timestamp: (/* @__PURE__ */ new Date()).toISOString(),
       level,
       source,
@@ -441,49 +365,59 @@ var Database = class {
       userId,
       metadata
     };
-    this.data.systemLogs.unshift(logItem);
-    if (this.data.systemLogs.length > 500) {
-      this.data.systemLogs = this.data.systemLogs.slice(0, 500);
+    console.log(`[${log.level.toUpperCase()}][${log.source}] ${log.message}${userId ? ` (User: ${userId})` : ""}`);
+    this.data.systemLogs.unshift(log);
+    if (this.data.systemLogs.length > 300) {
+      this.data.systemLogs = this.data.systemLogs.slice(0, 300);
     }
-    this.persist();
-    return logItem;
+    this.persistLocal();
+    if (this.isMongoConnected && this.mongoDb) {
+      this.mongoDb.collection("system_logs").insertOne(log).catch(() => {
+      });
+    }
   }
   getSystemLogs(limit = 100) {
     return this.data.systemLogs.slice(0, limit);
   }
-  // --- Settings & Stats ---
+  // --- Settings ---
   getSettings() {
     return this.data.settings;
   }
   updateSettings(patch) {
     this.data.settings = { ...this.data.settings, ...patch };
-    this.persist();
-    this.logSystem("info", "api", "System settings updated");
+    this.persistLocal();
+    if (this.isMongoConnected && this.mongoDb) {
+      this.mongoDb.collection("settings").updateOne({ _id: "global" }, { $set: { settings: this.data.settings } }, { upsert: true }).catch((err) => console.error("[Mongo] updateSettings error:", err));
+    }
     return this.data.settings;
   }
+  // --- System Stats (Strictly Real Data) ---
   getSystemStats() {
-    const oneDayAgo = Date.now() - 24 * 3600 * 1e3;
-    const totalUsers = this.data.users.length;
-    const activeUsers = this.data.users.filter((u) => u.status === "active").length;
-    const newUsers24h = this.data.users.filter(
-      (u) => new Date(u.createdAt).getTime() > oneDayAgo
-    ).length;
-    const totalAutomations = this.data.automations.length;
-    const activeAutomations = this.data.automations.filter((a) => a.status === "active").length;
-    let postsProcessed = 0;
-    let failedPosts = 0;
-    let adFilteredPosts = 0;
-    for (const post of this.data.posts) {
-      if (post.status === "published") postsProcessed++;
-      if (post.status === "failed") failedPosts++;
-      if (post.status === "filtered_ad") adFilteredPosts++;
-    }
+    const now = Date.now();
+    const oneDayAgo = now - 24 * 60 * 60 * 1e3;
+    const sevenDaysAgo = now - 7 * 24 * 60 * 60 * 1e3;
+    const thirtyDaysAgo = now - 30 * 24 * 60 * 60 * 1e3;
+    const users = this.data.users;
+    const automations = this.data.automations;
+    const posts = this.data.posts;
+    const activeUsers = users.filter((u) => {
+      const hasActiveAuto = automations.some((a) => a.userId === u.id && a.status === "active");
+      const activeRecently = new Date(u.lastActiveAt).getTime() >= thirtyDaysAgo;
+      return u.status === "active" && (hasActiveAuto || activeRecently);
+    }).length;
+    const newUsers24h = users.filter((u) => new Date(u.createdAt).getTime() >= oneDayAgo).length;
+    const newUsers7d = users.filter((u) => new Date(u.createdAt).getTime() >= sevenDaysAgo).length;
+    const activeAutomations = automations.filter((a) => a.status === "active").length;
+    const postsProcessed = posts.filter((p) => p.status === "published").length;
+    const failedPosts = posts.filter((p) => p.status === "failed").length;
+    const adFilteredPosts = posts.filter((p) => p.status === "filtered_ad").length;
     return {
-      totalUsers,
+      totalUsers: users.length,
       activeUsers,
       newUsers24h,
+      newUsers7d,
       activeAutomations,
-      totalAutomations,
+      totalAutomations: automations.length,
       postsProcessed,
       failedPosts,
       adFilteredPosts,
@@ -493,6 +427,585 @@ var Database = class {
   }
 };
 var db = new Database();
+
+// server/telegramBot.ts
+import crypto3 from "node:crypto";
+
+// server/telegramClient.ts
+function parseTelegramChannelInput(input) {
+  if (!input || typeof input !== "string") {
+    return { valid: false, canonical: "", error: "Channel identifier cannot be empty" };
+  }
+  const trimmed = input.trim();
+  const privateWebMatch = trimmed.match(/^(?:https?:\/\/)?(?:www\.)?t(?:elegram)?\.me\/c\/(\d+)(?:\/\d+)?\/?$/i);
+  if (privateWebMatch) {
+    return { valid: true, canonical: `-100${privateWebMatch[1]}` };
+  }
+  const publicWebMatch = trimmed.match(/^(?:https?:\/\/)?(?:www\.)?t(?:elegram)?\.me\/([a-zA-Z0-9_]{5,32})\/?$/i);
+  if (publicWebMatch) {
+    return { valid: true, canonical: `@${publicWebMatch[1]}` };
+  }
+  if (/^-100\d{7,16}$/.test(trimmed)) {
+    return { valid: true, canonical: trimmed };
+  }
+  if (/^-\d{7,16}$/.test(trimmed)) {
+    return { valid: true, canonical: trimmed };
+  }
+  if (/^@[a-zA-Z0-9_]{5,32}$/.test(trimmed)) {
+    return { valid: true, canonical: trimmed };
+  }
+  if (/^[a-zA-Z0-9_]{5,32}$/.test(trimmed)) {
+    return { valid: true, canonical: `@${trimmed}` };
+  }
+  return {
+    valid: false,
+    canonical: trimmed,
+    error: "Invalid format. Provide a channel username (e.g. @channel_name), a t.me link (https://t.me/channel_name), or a channel ID (-1001234567890)."
+  };
+}
+var TelegramClient = class {
+  getBotToken(overrideToken) {
+    const token = overrideToken || process.env.TELEGRAM_BOT_TOKEN || db.getSettings().botToken;
+    if (!token || token.trim() === "" || token.includes("TODO")) {
+      throw new Error("Telegram Bot Token is not configured. Set TELEGRAM_BOT_TOKEN in .env or configure in Admin Panel.");
+    }
+    return token.trim();
+  }
+  hasValidToken(overrideToken) {
+    try {
+      const token = this.getBotToken(overrideToken);
+      return token.length > 20 && token.includes(":");
+    } catch {
+      return false;
+    }
+  }
+  async callApi(endpoint, payload, overrideToken) {
+    const token = this.getBotToken(overrideToken);
+    const url = `https://api.telegram.org/bot${token}/${endpoint}`;
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    });
+    const json = await res.json();
+    if (!json.ok) {
+      const desc = json.description || "Unknown Telegram error";
+      const code = json.error_code || res.status;
+      const error = new Error(`Telegram API [${code}]: ${desc}`);
+      error.errorCode = code;
+      error.parameters = json.parameters;
+      throw error;
+    }
+    return json.result;
+  }
+  async getMe(overrideToken) {
+    const token = this.getBotToken(overrideToken);
+    const res = await fetch(`https://api.telegram.org/bot${token}/getMe`);
+    const json = await res.json();
+    if (!json.ok) {
+      throw new Error(`Telegram getMe error: ${json.description}`);
+    }
+    return json.result;
+  }
+  async getChat(chatId, overrideToken) {
+    const parsed = parseTelegramChannelInput(String(chatId));
+    const targetChatId = parsed.valid ? parsed.canonical : chatId;
+    return this.callApi("getChat", { chat_id: targetChatId }, overrideToken);
+  }
+  async getChatMember(chatId, userId, overrideToken) {
+    const parsed = parseTelegramChannelInput(String(chatId));
+    const targetChatId = parsed.valid ? parsed.canonical : chatId;
+    return this.callApi("getChatMember", { chat_id: targetChatId, user_id: userId }, overrideToken);
+  }
+  /**
+   * Strictly verifies whether the bot has been added to the channel
+   * and granted administrator permissions to post messages.
+   */
+  async verifyChannelPermissions(rawChatInput, overrideToken) {
+    const parsed = parseTelegramChannelInput(String(rawChatInput));
+    if (!parsed.valid) {
+      return {
+        canPost: false,
+        canonicalId: String(rawChatInput),
+        chatTitle: String(rawChatInput),
+        chatType: "unknown",
+        error: parsed.error
+      };
+    }
+    try {
+      const me = await this.getMe(overrideToken);
+      const chat = await this.getChat(parsed.canonical, overrideToken);
+      const member = await this.getChatMember(parsed.canonical, me.id, overrideToken);
+      const status = member.status;
+      const canPost = status === "creator" || status === "administrator" && member.can_post_messages !== false;
+      return {
+        canPost,
+        canonicalId: parsed.canonical,
+        chatTitle: chat.title || chat.username ? `@${chat.username}` : parsed.canonical,
+        chatType: chat.type,
+        error: canPost ? void 0 : `Bot is in the channel as '${status}', but does not have administrator post permissions (can_post_messages). Please promote the bot to Administrator.`
+      };
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      return {
+        canPost: false,
+        canonicalId: parsed.canonical,
+        chatTitle: parsed.canonical,
+        chatType: "unknown",
+        error: `Could not access channel: ${message}. Make sure the channel is public or the bot is added as an administrator.`
+      };
+    }
+  }
+  async sendMessage(chatId, text, options, overrideToken) {
+    const parsed = parseTelegramChannelInput(String(chatId));
+    const targetChatId = parsed.valid ? parsed.canonical : chatId;
+    const MAX_CHUNK = 4e3;
+    if (text.length > MAX_CHUNK) {
+      const chunks = this.splitMessage(text, MAX_CHUNK);
+      let lastResult = null;
+      for (let i = 0; i < chunks.length; i++) {
+        lastResult = await this.sendSingleMessage(
+          targetChatId,
+          chunks[i],
+          { ...options, reply_markup: i === chunks.length - 1 ? options?.reply_markup : void 0 },
+          overrideToken
+        );
+      }
+      return lastResult;
+    }
+    return this.sendSingleMessage(targetChatId, text, options, overrideToken);
+  }
+  async sendSingleMessage(chatId, text, options, overrideToken) {
+    const payload = {
+      chat_id: chatId,
+      text,
+      disable_web_page_preview: options?.disable_web_page_preview ?? false
+    };
+    if (options?.parse_mode) payload.parse_mode = options.parse_mode;
+    if (options?.reply_markup) payload.reply_markup = options.reply_markup;
+    if (options?.reply_to_message_id) payload.reply_to_message_id = options.reply_to_message_id;
+    try {
+      return await this.callApi("sendMessage", payload, overrideToken);
+    } catch (err) {
+      if (err.errorCode === 400 && err.message?.toLowerCase().includes("can't parse entities")) {
+        db.logSystem("warn", "telegram_bot", `Telegram parse error on entity tags; retrying as clean plain text`);
+        delete payload.parse_mode;
+        return await this.callApi("sendMessage", payload, overrideToken);
+      }
+      throw err;
+    }
+  }
+  async sendPhoto(chatId, photoUrl, caption, options, overrideToken) {
+    const parsed = parseTelegramChannelInput(String(chatId));
+    const targetChatId = parsed.valid ? parsed.canonical : chatId;
+    const payload = {
+      chat_id: targetChatId,
+      photo: photoUrl
+    };
+    if (caption) {
+      payload.caption = caption.slice(0, 1024);
+      if (options?.parse_mode) payload.parse_mode = options.parse_mode;
+    }
+    if (options?.reply_markup) payload.reply_markup = options.reply_markup;
+    try {
+      return await this.callApi("sendPhoto", payload, overrideToken);
+    } catch (err) {
+      db.logSystem("warn", "telegram_bot", `Remote photo send failed (${err.message}). Falling back to message with URL`);
+      return this.sendMessage(targetChatId, `${caption ? `${caption}
+
+` : ""}\u{1F4F7} ${photoUrl}`, options, overrideToken);
+    }
+  }
+  async sendVideo(chatId, videoUrl, caption, options, overrideToken) {
+    const parsed = parseTelegramChannelInput(String(chatId));
+    const targetChatId = parsed.valid ? parsed.canonical : chatId;
+    const payload = {
+      chat_id: targetChatId,
+      video: videoUrl
+    };
+    if (caption) {
+      payload.caption = caption.slice(0, 1024);
+      if (options?.parse_mode) payload.parse_mode = options.parse_mode;
+    }
+    if (options?.reply_markup) payload.reply_markup = options.reply_markup;
+    try {
+      return await this.callApi("sendVideo", payload, overrideToken);
+    } catch (err) {
+      db.logSystem("warn", "telegram_bot", `Remote video send failed (${err.message}). Falling back to message with URL`);
+      return this.sendMessage(targetChatId, `${caption ? `${caption}
+
+` : ""}\u{1F3AC} ${videoUrl}`, options, overrideToken);
+    }
+  }
+  async sendAnimation(chatId, gifUrl, caption, options, overrideToken) {
+    const parsed = parseTelegramChannelInput(String(chatId));
+    const targetChatId = parsed.valid ? parsed.canonical : chatId;
+    const payload = {
+      chat_id: targetChatId,
+      animation: gifUrl
+    };
+    if (caption) {
+      payload.caption = caption.slice(0, 1024);
+      if (options?.parse_mode) payload.parse_mode = options.parse_mode;
+    }
+    if (options?.reply_markup) payload.reply_markup = options.reply_markup;
+    try {
+      return await this.callApi("sendAnimation", payload, overrideToken);
+    } catch (err) {
+      return this.sendMessage(targetChatId, `${caption ? `${caption}
+
+` : ""}GIF: ${gifUrl}`, options, overrideToken);
+    }
+  }
+  async sendMediaGroup(chatId, media, overrideToken) {
+    const parsed = parseTelegramChannelInput(String(chatId));
+    const targetChatId = parsed.valid ? parsed.canonical : chatId;
+    const payload = {
+      chat_id: targetChatId,
+      media: media.slice(0, 10)
+    };
+    try {
+      return await this.callApi("sendMediaGroup", payload, overrideToken);
+    } catch (err) {
+      db.logSystem("warn", "telegram_bot", `Media group send failed (${err.message}). Falling back to single photo`);
+      if (media.length > 0) {
+        return this.sendPhoto(targetChatId, media[0].media, media[0].caption, void 0, overrideToken);
+      }
+    }
+  }
+  async setWebhook(url, secretToken, overrideToken) {
+    return this.callApi(
+      "setWebhook",
+      {
+        url,
+        secret_token: secretToken,
+        allowed_updates: ["message", "channel_post", "callback_query", "my_chat_member"]
+      },
+      overrideToken
+    );
+  }
+  async deleteWebhook(overrideToken) {
+    return this.callApi("deleteWebhook", { drop_pending_updates: false }, overrideToken);
+  }
+  async getUpdates(offset, limit = 100, timeout = 30, overrideToken) {
+    return this.callApi(
+      "getUpdates",
+      {
+        offset,
+        limit,
+        timeout,
+        allowed_updates: ["message", "channel_post", "callback_query", "my_chat_member"]
+      },
+      overrideToken
+    );
+  }
+  splitMessage(str, maxLength) {
+    const parts = [];
+    let current = "";
+    const paragraphs = str.split("\n\n");
+    for (const para of paragraphs) {
+      if ((current + "\n\n" + para).length <= maxLength) {
+        current = current ? current + "\n\n" + para : para;
+      } else {
+        if (current) parts.push(current);
+        if (para.length <= maxLength) {
+          current = para;
+        } else {
+          const lines = para.split("\n");
+          current = "";
+          for (const line of lines) {
+            if ((current + "\n" + line).length <= maxLength) {
+              current = current ? current + "\n" + line : line;
+            } else {
+              if (current) parts.push(current);
+              current = line;
+            }
+          }
+        }
+      }
+    }
+    if (current) parts.push(current);
+    return parts.length ? parts : [str];
+  }
+};
+var telegramClient = new TelegramClient();
+
+// server/xClient.ts
+import crypto2 from "node:crypto";
+var XClient = class {
+  constructor() {
+    this.defaultBearerToken = process.env.TWITTER_BEARER_TOKEN || "";
+    this.defaultClientId = process.env.TWITTER_CLIENT_ID || "";
+    this.defaultClientSecret = process.env.TWITTER_CLIENT_SECRET || "";
+  }
+  // --- OAuth 2.0 PKCE Helpers ---
+  generatePKCE() {
+    const verifier = crypto2.randomBytes(32).toString("base64url");
+    const challenge = crypto2.createHash("sha256").update(verifier).digest("base64url");
+    return { verifier, challenge };
+  }
+  getOAuth2AuthorizeUrl(options) {
+    const clientId = options.clientId || this.defaultClientId || "TWITTER_CLIENT_ID";
+    const params = new URLSearchParams({
+      response_type: "code",
+      client_id: clientId,
+      redirect_uri: options.redirectUri,
+      scope: "tweet.read tweet.write users.read offline.access",
+      state: options.state,
+      code_challenge: options.codeChallenge,
+      code_challenge_method: "S256"
+    });
+    return `https://twitter.com/i/oauth2/authorize?${params.toString()}`;
+  }
+  async exchangeOAuth2Code(options) {
+    const clientId = options.clientId || this.defaultClientId;
+    const clientSecret = options.clientSecret || this.defaultClientSecret;
+    const bodyParams = new URLSearchParams({
+      code: options.code,
+      grant_type: "authorization_code",
+      client_id: clientId,
+      redirect_uri: options.redirectUri,
+      code_verifier: options.codeVerifier
+    });
+    const headers = {
+      "Content-Type": "application/x-www-form-urlencoded"
+    };
+    if (clientSecret) {
+      headers["Authorization"] = `Basic ${Buffer.from(`${clientId}:${clientSecret}`).toString("base64")}`;
+    }
+    const res = await fetch("https://api.twitter.com/2/oauth2/token", {
+      method: "POST",
+      headers,
+      body: bodyParams.toString()
+    });
+    const json = await res.json();
+    if (!res.ok) {
+      throw new Error(`X OAuth2 exchange error: ${json.error_description || json.error || res.statusText}`);
+    }
+    return {
+      accessToken: json.access_token,
+      refreshToken: json.refresh_token,
+      expiresIn: json.expires_in || 7200,
+      scope: json.scope || ""
+    };
+  }
+  async refreshOAuth2Token(options) {
+    const clientId = options.clientId || this.defaultClientId;
+    const clientSecret = options.clientSecret || this.defaultClientSecret;
+    const bodyParams = new URLSearchParams({
+      grant_type: "refresh_token",
+      refresh_token: options.refreshToken,
+      client_id: clientId
+    });
+    const headers = {
+      "Content-Type": "application/x-www-form-urlencoded"
+    };
+    if (clientSecret) {
+      headers["Authorization"] = `Basic ${Buffer.from(`${clientId}:${clientSecret}`).toString("base64")}`;
+    }
+    const res = await fetch("https://api.twitter.com/2/oauth2/token", {
+      method: "POST",
+      headers,
+      body: bodyParams.toString()
+    });
+    const json = await res.json();
+    if (!res.ok) {
+      throw new Error(`X OAuth2 refresh error: ${json.error_description || json.error || res.statusText}`);
+    }
+    return {
+      accessToken: json.access_token,
+      refreshToken: json.refresh_token,
+      expiresIn: json.expires_in || 7200
+    };
+  }
+  // --- OAuth 1.0a Signature Generator (RFC 5849) ---
+  getOAuth1Header(options) {
+    const oauthParams = {
+      oauth_consumer_key: options.apiKey,
+      oauth_nonce: crypto2.randomBytes(16).toString("hex"),
+      oauth_signature_method: "HMAC-SHA1",
+      oauth_timestamp: Math.floor(Date.now() / 1e3).toString(),
+      oauth_token: options.accessToken,
+      oauth_version: "1.0"
+    };
+    const sortedKeys = Object.keys(oauthParams).sort();
+    const paramString = sortedKeys.map((k) => `${encodeURIComponent(k)}=${encodeURIComponent(oauthParams[k])}`).join("&");
+    const signatureBase = `${options.method.toUpperCase()}&${encodeURIComponent(options.url)}&${encodeURIComponent(paramString)}`;
+    const signingKey = `${encodeURIComponent(options.apiSecret)}&${encodeURIComponent(options.accessSecret)}`;
+    const signature = crypto2.createHmac("sha1", signingKey).update(signatureBase).digest("base64");
+    oauthParams["oauth_signature"] = signature;
+    const headerParts = Object.keys(oauthParams).sort().map((k) => `${encodeURIComponent(k)}="${encodeURIComponent(oauthParams[k])}"`);
+    return `OAuth ${headerParts.join(", ")}`;
+  }
+  // --- Posting Tweets (Telegram ➔ X) ---
+  async postTweet(creds, text, options) {
+    const url = "https://api.twitter.com/2/tweets";
+    const payload = { text };
+    if (options?.mediaIds && options.mediaIds.length > 0) {
+      payload.media = { media_ids: options.mediaIds };
+    }
+    if (options?.inReplyToTweetId) {
+      payload.reply = { in_reply_to_tweet_id: options.inReplyToTweetId };
+    }
+    const headers = {
+      "Content-Type": "application/json"
+    };
+    if (creds.oauth2AccessToken) {
+      headers["Authorization"] = `Bearer ${creds.oauth2AccessToken}`;
+    } else if (creds.apiKey && creds.apiSecret && creds.accessToken && creds.accessSecret) {
+      headers["Authorization"] = this.getOAuth1Header({
+        url,
+        method: "POST",
+        apiKey: creds.apiKey,
+        apiSecret: creds.apiSecret,
+        accessToken: creds.accessToken,
+        accessSecret: creds.accessSecret
+      });
+    } else if (creds.bearerToken) {
+      headers["Authorization"] = `Bearer ${creds.bearerToken}`;
+    } else if (this.defaultBearerToken) {
+      headers["Authorization"] = `Bearer ${this.defaultBearerToken}`;
+    } else {
+      throw new Error(
+        "No X (Twitter) credentials configured. Please authenticate via OAuth2 or provide API keys in Settings."
+      );
+    }
+    const res = await fetch(url, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(payload)
+    });
+    const json = await res.json();
+    if (!res.ok) {
+      const errorMsg = json.detail || json.errors?.[0]?.message || res.statusText;
+      const error = new Error(`X API [${res.status}]: ${errorMsg}`);
+      error.status = res.status;
+      error.data = json;
+      throw error;
+    }
+    return {
+      id: json.data?.id || `tweet_${Date.now()}`,
+      text: json.data?.text || text
+    };
+  }
+  async postThread(creds, threadTexts, mediaIds) {
+    const postedIds = [];
+    let lastTweetId = void 0;
+    for (let i = 0; i < threadTexts.length; i++) {
+      const text = threadTexts[i];
+      const tweetMedia = i === 0 ? mediaIds : void 0;
+      const result = await this.postTweet(creds, text, {
+        mediaIds: tweetMedia,
+        inReplyToTweetId: lastTweetId
+      });
+      postedIds.push(result.id);
+      lastTweetId = result.id;
+      if (i < threadTexts.length - 1) {
+        await new Promise((r) => setTimeout(r, 1200));
+      }
+    }
+    return postedIds;
+  }
+  // --- Media Upload (X API v1.1) ---
+  async uploadMedia(creds, mediaBuffer, mimeType = "image/jpeg") {
+    const url = "https://upload.twitter.com/1.1/media/upload.json";
+    const formData = new FormData();
+    const blob = new Blob([mediaBuffer], { type: mimeType });
+    formData.append("media", blob);
+    const headers = {};
+    if (creds.apiKey && creds.apiSecret && creds.accessToken && creds.accessSecret) {
+      headers["Authorization"] = this.getOAuth1Header({
+        url,
+        method: "POST",
+        apiKey: creds.apiKey,
+        apiSecret: creds.apiSecret,
+        accessToken: creds.accessToken,
+        accessSecret: creds.accessSecret
+      });
+    } else if (creds.oauth2AccessToken) {
+      headers["Authorization"] = `Bearer ${creds.oauth2AccessToken}`;
+    } else {
+      throw new Error("X media upload requires OAuth credentials (API Key + Access Token or OAuth2).");
+    }
+    const res = await fetch(url, {
+      method: "POST",
+      headers,
+      body: formData
+    });
+    const json = await res.json();
+    if (!res.ok) {
+      throw new Error(`X Media Upload error: ${json.error || json.errors?.[0]?.message || res.statusText}`);
+    }
+    return json.media_id_string || String(json.media_id);
+  }
+  // --- Source Monitoring (X ➔ Telegram) using Official X API v2 ---
+  async fetchRecentTweets(authorHandle, sinceId, overrideBearer) {
+    const handle = authorHandle.replace("@", "").trim();
+    const bearer = overrideBearer || this.defaultBearerToken;
+    if (!bearer || bearer.trim() === "" || bearer.includes("TODO")) {
+      throw new Error(
+        `Official X API requires a valid TWITTER_BEARER_TOKEN or OAuth 2.0 Access Token to monitor @${handle}. Set TWITTER_BEARER_TOKEN in environment variables.`
+      );
+    }
+    return await this.fetchViaOfficialApi(handle, sinceId, bearer.trim());
+  }
+  async fetchViaOfficialApi(handle, sinceId, bearer) {
+    const userRes = await fetch(`https://api.twitter.com/2/users/by/username/${handle}`, {
+      headers: { Authorization: `Bearer ${bearer}` }
+    });
+    const userJson = await userRes.json();
+    if (!userRes.ok || !userJson.data?.id) {
+      const errDetail = userJson.detail || userJson.errors?.[0]?.message || userRes.statusText;
+      throw new Error(`Official X API user lookup for @${handle} failed: ${errDetail}`);
+    }
+    const xUserId = userJson.data.id;
+    let url = `https://api.twitter.com/2/users/${xUserId}/tweets?max_results=10&tweet.fields=created_at,entities,attachments&expansions=attachments.media_keys&media.fields=url,preview_image_url,type,variants`;
+    if (sinceId) {
+      url += `&since_id=${sinceId}`;
+    }
+    const tweetRes = await fetch(url, {
+      headers: { Authorization: `Bearer ${bearer}` }
+    });
+    if (tweetRes.status === 429) {
+      const resetHeader = tweetRes.headers.get("x-rate-limit-reset");
+      const resetSeconds = resetHeader ? Math.max(1, parseInt(resetHeader) - Math.floor(Date.now() / 1e3)) : 60;
+      throw new Error(`X API Rate Limit reached for @${handle}. Rate limit resets in ${resetSeconds}s.`);
+    }
+    const tweetJson = await tweetRes.json();
+    if (!tweetRes.ok) {
+      const errDetail = tweetJson.detail || tweetJson.errors?.[0]?.message || tweetRes.statusText;
+      throw new Error(`Official X API tweet fetch for @${handle} failed: ${errDetail}`);
+    }
+    const tweets = tweetJson.data || [];
+    const mediaMap = /* @__PURE__ */ new Map();
+    if (tweetJson.includes?.media) {
+      for (const m of tweetJson.includes.media) {
+        mediaMap.set(m.media_key, {
+          type: m.type === "video" ? "video" : m.type === "animated_gif" ? "gif" : "image",
+          url: m.url || m.preview_image_url || ""
+        });
+      }
+    }
+    return tweets.map((t) => {
+      const mediaList = [];
+      if (t.attachments?.media_keys) {
+        for (const k of t.attachments.media_keys) {
+          const m = mediaMap.get(k);
+          if (m && m.url) mediaList.push(m);
+        }
+      }
+      return {
+        id: t.id,
+        text: t.text,
+        author: `@${handle}`,
+        createdAt: t.created_at || (/* @__PURE__ */ new Date()).toISOString(),
+        url: `https://x.com/${handle}/status/${t.id}`,
+        media: mediaList
+      };
+    });
+  }
+};
+var xClient = new XClient();
 
 // server/gemini.ts
 import { GoogleGenAI, Type } from "@google/genai";
@@ -770,619 +1283,6 @@ ${formatted}`;
   }
 }
 
-// server/telegramClient.ts
-var TelegramClient = class {
-  getBotToken(overrideToken) {
-    const token = overrideToken || process.env.TELEGRAM_BOT_TOKEN || db.getSettings().botToken;
-    if (!token || token.trim() === "" || token.includes("TODO")) {
-      throw new Error("Telegram Bot Token is not configured. Set TELEGRAM_BOT_TOKEN in .env or configure in Admin Panel.");
-    }
-    return token.trim();
-  }
-  hasValidToken(overrideToken) {
-    try {
-      const token = this.getBotToken(overrideToken);
-      return token.length > 20 && token.includes(":");
-    } catch {
-      return false;
-    }
-  }
-  async callApi(endpoint, payload, overrideToken) {
-    const token = this.getBotToken(overrideToken);
-    const url = `https://api.telegram.org/bot${token}/${endpoint}`;
-    const res = await fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload)
-    });
-    const json = await res.json();
-    if (!json.ok) {
-      const desc = json.description || "Unknown Telegram error";
-      const code = json.error_code || res.status;
-      const error = new Error(`Telegram API [${code}]: ${desc}`);
-      error.errorCode = code;
-      error.parameters = json.parameters;
-      throw error;
-    }
-    return json.result;
-  }
-  async getMe(overrideToken) {
-    const token = this.getBotToken(overrideToken);
-    const res = await fetch(`https://api.telegram.org/bot${token}/getMe`);
-    const json = await res.json();
-    if (!json.ok) {
-      throw new Error(`Telegram getMe error: ${json.description}`);
-    }
-    return json.result;
-  }
-  async getChat(chatId, overrideToken) {
-    const formattedChatId = this.formatChatId(chatId);
-    return this.callApi("getChat", { chat_id: formattedChatId }, overrideToken);
-  }
-  async getChatMember(chatId, userId, overrideToken) {
-    const formattedChatId = this.formatChatId(chatId);
-    return this.callApi("getChatMember", { chat_id: formattedChatId, user_id: userId }, overrideToken);
-  }
-  async verifyChannelPermissions(chatId, overrideToken) {
-    try {
-      const me = await this.getMe(overrideToken);
-      const chat = await this.getChat(chatId, overrideToken);
-      const member = await this.getChatMember(chatId, me.id, overrideToken);
-      const status = member.status;
-      const canPost = status === "creator" || status === "administrator" && member.can_post_messages !== false;
-      return {
-        canPost,
-        chatTitle: chat.title || chat.username || String(chatId),
-        chatType: chat.type
-      };
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      return {
-        canPost: false,
-        chatTitle: String(chatId),
-        chatType: "unknown",
-        error: message
-      };
-    }
-  }
-  async sendMessage(chatId, text, options, overrideToken) {
-    const formattedChatId = this.formatChatId(chatId);
-    const parseMode = options?.parse_mode || "HTML";
-    const MAX_CHUNK = 4e3;
-    if (text.length > MAX_CHUNK) {
-      const chunks = this.splitMessage(text, MAX_CHUNK);
-      let lastResult = null;
-      for (let i = 0; i < chunks.length; i++) {
-        lastResult = await this.sendSingleMessage(
-          formattedChatId,
-          chunks[i],
-          { ...options, reply_markup: i === chunks.length - 1 ? options?.reply_markup : void 0 },
-          overrideToken
-        );
-      }
-      return lastResult;
-    }
-    return this.sendSingleMessage(formattedChatId, text, options, overrideToken);
-  }
-  async sendSingleMessage(chatId, text, options, overrideToken) {
-    try {
-      return await this.callApi(
-        "sendMessage",
-        {
-          chat_id: chatId,
-          text,
-          parse_mode: options?.parse_mode || "HTML",
-          disable_web_page_preview: options?.disable_web_page_preview,
-          reply_markup: options?.reply_markup,
-          reply_to_message_id: options?.reply_to_message_id
-        },
-        overrideToken
-      );
-    } catch (err) {
-      if (err.message && err.message.toLowerCase().includes("can't parse entities")) {
-        db.logSystem("warn", "telegram_bot", `Telegram parse error on entity tags; retrying as clean text`);
-        const cleanText = text.replace(/<[^>]*>/g, "");
-        return await this.callApi(
-          "sendMessage",
-          {
-            chat_id: chatId,
-            text: cleanText,
-            disable_web_page_preview: options?.disable_web_page_preview,
-            reply_markup: options?.reply_markup,
-            reply_to_message_id: options?.reply_to_message_id
-          },
-          overrideToken
-        );
-      }
-      throw err;
-    }
-  }
-  async sendPhoto(chatId, photoUrlOrBuffer, caption, options, overrideToken) {
-    const formattedChatId = this.formatChatId(chatId);
-    if (typeof photoUrlOrBuffer === "string") {
-      try {
-        return await this.callApi(
-          "sendPhoto",
-          {
-            chat_id: formattedChatId,
-            photo: photoUrlOrBuffer,
-            caption: caption ? caption.slice(0, 1024) : void 0,
-            parse_mode: options?.parse_mode || "HTML",
-            reply_markup: options?.reply_markup
-          },
-          overrideToken
-        );
-      } catch (err) {
-        db.logSystem("warn", "telegram_bot", `Remote photo send failed (${err.message}). Falling back to text link`);
-        const fallbackText = caption ? `${caption}
-
-\u{1F5BC}\uFE0F Photo: ${photoUrlOrBuffer}` : `\u{1F5BC}\uFE0F Photo: ${photoUrlOrBuffer}`;
-        return await this.sendMessage(formattedChatId, fallbackText, options, overrideToken);
-      }
-    } else {
-      const token = this.getBotToken(overrideToken);
-      const formData = new FormData();
-      formData.append("chat_id", String(formattedChatId));
-      if (caption) formData.append("caption", caption.slice(0, 1024));
-      if (options?.parse_mode) formData.append("parse_mode", options.parse_mode);
-      const blob = new Blob([photoUrlOrBuffer]);
-      formData.append("photo", blob, "image.jpg");
-      const res = await fetch(`https://api.telegram.org/bot${token}/sendPhoto`, {
-        method: "POST",
-        body: formData
-      });
-      const json = await res.json();
-      if (!json.ok) throw new Error(`Telegram sendPhoto Buffer error: ${json.description}`);
-      return json.result;
-    }
-  }
-  async sendVideo(chatId, videoUrl, caption, options, overrideToken) {
-    const formattedChatId = this.formatChatId(chatId);
-    try {
-      return await this.callApi(
-        "sendVideo",
-        {
-          chat_id: formattedChatId,
-          video: videoUrl,
-          caption: caption ? caption.slice(0, 1024) : void 0,
-          parse_mode: options?.parse_mode || "HTML",
-          reply_markup: options?.reply_markup
-        },
-        overrideToken
-      );
-    } catch (err) {
-      db.logSystem("warn", "telegram_bot", `Remote video send failed (${err.message}). Falling back to text link`);
-      const fallbackText = caption ? `${caption}
-
-\u{1F3A5} Video: ${videoUrl}` : `\u{1F3A5} Video: ${videoUrl}`;
-      return await this.sendMessage(formattedChatId, fallbackText, options, overrideToken);
-    }
-  }
-  async sendMediaGroup(chatId, mediaList, options, overrideToken) {
-    const formattedChatId = this.formatChatId(chatId);
-    const mediaPayload = mediaList.slice(0, 10).map((m, idx) => ({
-      type: m.type,
-      media: m.url,
-      caption: idx === 0 && m.caption ? m.caption.slice(0, 1024) : void 0,
-      parse_mode: idx === 0 ? options?.parse_mode || "HTML" : void 0
-    }));
-    try {
-      return await this.callApi(
-        "sendMediaGroup",
-        {
-          chat_id: formattedChatId,
-          media: mediaPayload
-        },
-        overrideToken
-      );
-    } catch (err) {
-      db.logSystem("warn", "telegram_bot", `Media group send failed (${err.message}). Falling back to single photo`);
-      if (mediaList.length > 0) {
-        return await this.sendPhoto(formattedChatId, mediaList[0].url, mediaList[0].caption, options, overrideToken);
-      }
-      throw err;
-    }
-  }
-  async getFile(fileId, overrideToken) {
-    const file = await this.callApi("getFile", { file_id: fileId }, overrideToken);
-    const token = this.getBotToken(overrideToken);
-    const fileUrl = `https://api.telegram.org/file/bot${token}/${file.file_path}`;
-    return { filePath: file.file_path, fileUrl };
-  }
-  async downloadFileBuffer(fileId, overrideToken) {
-    const { fileUrl } = await this.getFile(fileId, overrideToken);
-    const res = await fetch(fileUrl);
-    if (!res.ok) throw new Error(`Failed to download file from Telegram: ${res.statusText}`);
-    const arrayBuffer = await res.arrayBuffer();
-    return Buffer.from(arrayBuffer);
-  }
-  async setWebhook(url, overrideToken) {
-    return this.callApi(
-      "setWebhook",
-      {
-        url,
-        allowed_updates: ["message", "channel_post", "callback_query", "my_chat_member"],
-        drop_pending_updates: false
-      },
-      overrideToken
-    );
-  }
-  async deleteWebhook(overrideToken) {
-    return this.callApi("deleteWebhook", { drop_pending_updates: false }, overrideToken);
-  }
-  async getUpdates(offset, limit = 100, timeout = 30, overrideToken) {
-    return this.callApi(
-      "getUpdates",
-      {
-        offset,
-        limit,
-        timeout,
-        allowed_updates: ["message", "channel_post", "callback_query", "my_chat_member"]
-      },
-      overrideToken
-    );
-  }
-  formatChatId(chatId) {
-    if (typeof chatId === "number") return chatId;
-    const str = chatId.trim();
-    if (str.startsWith("@") || /^-?\d+$/.test(str)) {
-      return /^-?\d+$/.test(str) ? parseInt(str, 10) : str;
-    }
-    return `@${str}`;
-  }
-  splitMessage(str, maxLength) {
-    const parts = [];
-    let current = "";
-    const paragraphs = str.split("\n\n");
-    for (const para of paragraphs) {
-      if ((current + "\n\n" + para).length <= maxLength) {
-        current = current ? current + "\n\n" + para : para;
-      } else {
-        if (current) parts.push(current);
-        if (para.length <= maxLength) {
-          current = para;
-        } else {
-          const lines = para.split("\n");
-          current = "";
-          for (const line of lines) {
-            if ((current + "\n" + line).length <= maxLength) {
-              current = current ? current + "\n" + line : line;
-            } else {
-              if (current) parts.push(current);
-              current = line;
-            }
-          }
-        }
-      }
-    }
-    if (current) parts.push(current);
-    return parts.length ? parts : [str];
-  }
-};
-var telegramClient = new TelegramClient();
-
-// server/xClient.ts
-import crypto from "node:crypto";
-var XClient = class {
-  constructor() {
-    this.defaultBearerToken = process.env.TWITTER_BEARER_TOKEN || "";
-    this.defaultClientId = process.env.TWITTER_CLIENT_ID || "";
-    this.defaultClientSecret = process.env.TWITTER_CLIENT_SECRET || "";
-  }
-  // --- OAuth 2.0 PKCE Helpers ---
-  generatePKCE() {
-    const verifier = crypto.randomBytes(32).toString("base64url");
-    const challenge = crypto.createHash("sha256").update(verifier).digest("base64url");
-    return { verifier, challenge };
-  }
-  getOAuth2AuthorizeUrl(options) {
-    const clientId = options.clientId || this.defaultClientId || "TWITTER_CLIENT_ID";
-    const params = new URLSearchParams({
-      response_type: "code",
-      client_id: clientId,
-      redirect_uri: options.redirectUri,
-      scope: "tweet.read tweet.write users.read offline.access",
-      state: options.state,
-      code_challenge: options.codeChallenge,
-      code_challenge_method: "S256"
-    });
-    return `https://twitter.com/i/oauth2/authorize?${params.toString()}`;
-  }
-  async exchangeOAuth2Code(options) {
-    const clientId = options.clientId || this.defaultClientId;
-    const clientSecret = options.clientSecret || this.defaultClientSecret;
-    const bodyParams = new URLSearchParams({
-      code: options.code,
-      grant_type: "authorization_code",
-      client_id: clientId,
-      redirect_uri: options.redirectUri,
-      code_verifier: options.codeVerifier
-    });
-    const headers = {
-      "Content-Type": "application/x-www-form-urlencoded"
-    };
-    if (clientSecret) {
-      headers["Authorization"] = `Basic ${Buffer.from(`${clientId}:${clientSecret}`).toString("base64")}`;
-    }
-    const res = await fetch("https://api.twitter.com/2/oauth2/token", {
-      method: "POST",
-      headers,
-      body: bodyParams.toString()
-    });
-    const json = await res.json();
-    if (!res.ok) {
-      throw new Error(`X OAuth2 exchange error: ${json.error_description || json.error || res.statusText}`);
-    }
-    return {
-      accessToken: json.access_token,
-      refreshToken: json.refresh_token,
-      expiresIn: json.expires_in || 7200,
-      scope: json.scope || ""
-    };
-  }
-  async refreshOAuth2Token(options) {
-    const clientId = options.clientId || this.defaultClientId;
-    const clientSecret = options.clientSecret || this.defaultClientSecret;
-    const bodyParams = new URLSearchParams({
-      grant_type: "refresh_token",
-      refresh_token: options.refreshToken,
-      client_id: clientId
-    });
-    const headers = {
-      "Content-Type": "application/x-www-form-urlencoded"
-    };
-    if (clientSecret) {
-      headers["Authorization"] = `Basic ${Buffer.from(`${clientId}:${clientSecret}`).toString("base64")}`;
-    }
-    const res = await fetch("https://api.twitter.com/2/oauth2/token", {
-      method: "POST",
-      headers,
-      body: bodyParams.toString()
-    });
-    const json = await res.json();
-    if (!res.ok) {
-      throw new Error(`X OAuth2 refresh error: ${json.error_description || json.error || res.statusText}`);
-    }
-    return {
-      accessToken: json.access_token,
-      refreshToken: json.refresh_token,
-      expiresIn: json.expires_in || 7200
-    };
-  }
-  // --- OAuth 1.0a Signature Generator (RFC 5849) ---
-  getOAuth1Header(options) {
-    const oauthParams = {
-      oauth_consumer_key: options.apiKey,
-      oauth_nonce: crypto.randomBytes(16).toString("hex"),
-      oauth_signature_method: "HMAC-SHA1",
-      oauth_timestamp: Math.floor(Date.now() / 1e3).toString(),
-      oauth_token: options.accessToken,
-      oauth_version: "1.0"
-    };
-    const sortedKeys = Object.keys(oauthParams).sort();
-    const paramString = sortedKeys.map((k) => `${encodeURIComponent(k)}=${encodeURIComponent(oauthParams[k])}`).join("&");
-    const signatureBase = `${options.method.toUpperCase()}&${encodeURIComponent(options.url)}&${encodeURIComponent(paramString)}`;
-    const signingKey = `${encodeURIComponent(options.apiSecret)}&${encodeURIComponent(options.accessSecret)}`;
-    const signature = crypto.createHmac("sha1", signingKey).update(signatureBase).digest("base64");
-    oauthParams["oauth_signature"] = signature;
-    const headerParts = Object.keys(oauthParams).sort().map((k) => `${encodeURIComponent(k)}="${encodeURIComponent(oauthParams[k])}"`);
-    return `OAuth ${headerParts.join(", ")}`;
-  }
-  // --- Posting Tweets (Telegram ➔ X) ---
-  async postTweet(creds, text, options) {
-    const url = "https://api.twitter.com/2/tweets";
-    const payload = { text };
-    if (options?.mediaIds && options.mediaIds.length > 0) {
-      payload.media = { media_ids: options.mediaIds };
-    }
-    if (options?.inReplyToTweetId) {
-      payload.reply = { in_reply_to_tweet_id: options.inReplyToTweetId };
-    }
-    const headers = {
-      "Content-Type": "application/json"
-    };
-    if (creds.oauth2AccessToken) {
-      headers["Authorization"] = `Bearer ${creds.oauth2AccessToken}`;
-    } else if (creds.apiKey && creds.apiSecret && creds.accessToken && creds.accessSecret) {
-      headers["Authorization"] = this.getOAuth1Header({
-        url,
-        method: "POST",
-        apiKey: creds.apiKey,
-        apiSecret: creds.apiSecret,
-        accessToken: creds.accessToken,
-        accessSecret: creds.accessSecret
-      });
-    } else if (creds.bearerToken) {
-      headers["Authorization"] = `Bearer ${creds.bearerToken}`;
-    } else if (this.defaultBearerToken) {
-      headers["Authorization"] = `Bearer ${this.defaultBearerToken}`;
-    } else {
-      throw new Error(
-        "No X (Twitter) credentials configured. Please authenticate via OAuth2 or provide API keys in Settings."
-      );
-    }
-    const res = await fetch(url, {
-      method: "POST",
-      headers,
-      body: JSON.stringify(payload)
-    });
-    const json = await res.json();
-    if (!res.ok) {
-      const errorMsg = json.detail || json.errors?.[0]?.message || res.statusText;
-      const error = new Error(`X API [${res.status}]: ${errorMsg}`);
-      error.status = res.status;
-      error.data = json;
-      throw error;
-    }
-    return {
-      id: json.data?.id || `tweet_${Date.now()}`,
-      text: json.data?.text || text
-    };
-  }
-  async postThread(creds, threadTexts, mediaIds) {
-    const postedIds = [];
-    let lastTweetId = void 0;
-    for (let i = 0; i < threadTexts.length; i++) {
-      const text = threadTexts[i];
-      const tweetMedia = i === 0 ? mediaIds : void 0;
-      const result = await this.postTweet(creds, text, {
-        mediaIds: tweetMedia,
-        inReplyToTweetId: lastTweetId
-      });
-      postedIds.push(result.id);
-      lastTweetId = result.id;
-      if (i < threadTexts.length - 1) {
-        await new Promise((r) => setTimeout(r, 1200));
-      }
-    }
-    return postedIds;
-  }
-  // --- Media Upload (X API v1.1) ---
-  async uploadMedia(creds, mediaBuffer, mimeType = "image/jpeg") {
-    const url = "https://upload.twitter.com/1.1/media/upload.json";
-    const formData = new FormData();
-    const blob = new Blob([mediaBuffer], { type: mimeType });
-    formData.append("media", blob);
-    const headers = {};
-    if (creds.apiKey && creds.apiSecret && creds.accessToken && creds.accessSecret) {
-      headers["Authorization"] = this.getOAuth1Header({
-        url,
-        method: "POST",
-        apiKey: creds.apiKey,
-        apiSecret: creds.apiSecret,
-        accessToken: creds.accessToken,
-        accessSecret: creds.accessSecret
-      });
-    } else if (creds.oauth2AccessToken) {
-      headers["Authorization"] = `Bearer ${creds.oauth2AccessToken}`;
-    } else {
-      throw new Error("X media upload requires OAuth credentials (API Key + Access Token or OAuth2).");
-    }
-    const res = await fetch(url, {
-      method: "POST",
-      headers,
-      body: formData
-    });
-    const json = await res.json();
-    if (!res.ok) {
-      throw new Error(`X Media Upload error: ${json.error || json.errors?.[0]?.message || res.statusText}`);
-    }
-    return json.media_id_string || String(json.media_id);
-  }
-  // --- Source Monitoring (X ➔ Telegram) ---
-  async fetchRecentTweets(authorHandle, sinceId, overrideBearer) {
-    const handle = authorHandle.replace("@", "").trim();
-    const bearer = overrideBearer || this.defaultBearerToken || db.getSettings().botToken;
-    if (bearer && !bearer.includes("TODO") && bearer.length > 25) {
-      try {
-        return await this.fetchViaOfficialApi(handle, sinceId, bearer);
-      } catch (err) {
-        db.logSystem("warn", "x_client", `Official X API check failed for @${handle}: ${err.message}. Falling back to public feed.`);
-      }
-    }
-    return await this.fetchViaPublicSyndication(handle, sinceId);
-  }
-  async fetchViaOfficialApi(handle, sinceId, bearer) {
-    const userRes = await fetch(`https://api.twitter.com/2/users/by/username/${handle}`, {
-      headers: { Authorization: `Bearer ${bearer}` }
-    });
-    const userJson = await userRes.json();
-    if (!userRes.ok || !userJson.data?.id) {
-      throw new Error(`User lookup for @${handle} failed: ${userJson.detail || userRes.statusText}`);
-    }
-    const xUserId = userJson.data.id;
-    let url = `https://api.twitter.com/2/users/${xUserId}/tweets?max_results=5&tweet.fields=created_at,entities,attachments&expansions=attachments.media_keys&media.fields=url,preview_image_url,type`;
-    if (sinceId) {
-      url += `&since_id=${sinceId}`;
-    }
-    const tweetRes = await fetch(url, {
-      headers: { Authorization: `Bearer ${bearer}` }
-    });
-    const tweetJson = await tweetRes.json();
-    if (!tweetRes.ok) {
-      throw new Error(`Tweet fetch failed: ${tweetJson.detail || tweetRes.statusText}`);
-    }
-    const tweets = tweetJson.data || [];
-    const mediaMap = /* @__PURE__ */ new Map();
-    if (tweetJson.includes?.media) {
-      for (const m of tweetJson.includes.media) {
-        mediaMap.set(m.media_key, {
-          type: m.type === "video" ? "video" : m.type === "animated_gif" ? "gif" : "image",
-          url: m.url || m.preview_image_url || ""
-        });
-      }
-    }
-    return tweets.map((t) => {
-      const mediaList = [];
-      if (t.attachments?.media_keys) {
-        for (const k of t.attachments.media_keys) {
-          const m = mediaMap.get(k);
-          if (m && m.url) mediaList.push(m);
-        }
-      }
-      return {
-        id: t.id,
-        text: t.text,
-        author: `@${handle}`,
-        createdAt: t.created_at || (/* @__PURE__ */ new Date()).toISOString(),
-        url: `https://x.com/${handle}/status/${t.id}`,
-        media: mediaList
-      };
-    });
-  }
-  async fetchViaPublicSyndication(handle, sinceId) {
-    try {
-      const syndicationUrl = `https://syndication.twitter.com/srv/timeline-profile/screen-name/${handle}?showReplies=false`;
-      const res = await fetch(syndicationUrl, {
-        headers: {
-          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-          Accept: "text/html,application/xhtml+xml"
-        }
-      });
-      if (!res.ok) {
-        return [];
-      }
-      const html = await res.text();
-      const nextDataMatch = html.match(/<script id="__NEXT_DATA__" type="application\/json">([\s\S]*?)<\/script>/);
-      if (!nextDataMatch) {
-        return [];
-      }
-      const parsed = JSON.parse(nextDataMatch[1]);
-      const timelineData = parsed?.props?.pageProps?.timeline?.entries || parsed?.props?.pageProps?.data?.user?.result?.timeline?.timeline?.instructions || [];
-      const results = [];
-      for (const entry of timelineData) {
-        const tweet = entry?.content?.tweet || entry?.content?.itemContent?.tweet_results?.result;
-        if (!tweet) continue;
-        const id = tweet.id_str || tweet.rest_id;
-        if (!id || sinceId && id <= sinceId) continue;
-        const text = tweet.text || tweet.legacy?.full_text || "";
-        const createdAt = tweet.created_at || tweet.legacy?.created_at || (/* @__PURE__ */ new Date()).toISOString();
-        const mediaItems = [];
-        const mediaEntries = tweet.entities?.media || tweet.legacy?.entities?.media || [];
-        for (const m of mediaEntries) {
-          mediaItems.push({
-            type: m.type === "video" ? "video" : "image",
-            url: m.media_url_https || m.media_url || ""
-          });
-        }
-        results.push({
-          id,
-          text,
-          author: `@${handle}`,
-          createdAt,
-          url: `https://x.com/${handle}/status/${id}`,
-          media: mediaItems
-        });
-      }
-      return results;
-    } catch (err) {
-      db.logSystem("warn", "x_client", `Syndication fetch note for @${handle}: ${err instanceof Error ? err.message : String(err)}`);
-      return [];
-    }
-  }
-};
-var xClient = new XClient();
-
 // server/queue.ts
 var AutomationQueue = class {
   // Rate limiting per destination
@@ -1403,6 +1303,10 @@ var AutomationQueue = class {
     if (db.isPostProcessed(automation.id, postData.sourcePostId)) {
       db.logSystem("warn", "queue", `Deduplication dropped existing post ${postData.sourcePostId}`, automation.userId);
       return { status: "duplicate", reason: "Post was already published previously" };
+    }
+    if (db.isContentDuplicate(automation.id, postData.sourceContent)) {
+      db.logSystem("warn", "queue", `Deduplication dropped duplicate content`, automation.userId);
+      return { status: "duplicate", reason: "Duplicate content already published previously" };
     }
     const alreadyQueued = this.queue.some(
       (j) => j.automationId === automation.id && j.sourcePostId === postData.sourcePostId && j.status === "pending"
@@ -1618,40 +1522,55 @@ var AutomationQueue = class {
     let publishedId = `tg_${Date.now()}`;
     if (telegramClient.hasValidToken()) {
       try {
+        const CAPTION_LIMIT = 1024;
+        let caption = content;
+        let followUpText = null;
+        if (media.length > 0 && content.length > CAPTION_LIMIT) {
+          const lastSpace = content.lastIndexOf(" ", CAPTION_LIMIT - 10);
+          const splitIdx = lastSpace > 500 ? lastSpace : CAPTION_LIMIT - 10;
+          caption = content.substring(0, splitIdx).trim();
+          followUpText = content.substring(splitIdx).trim();
+        }
         if (media.length === 1) {
           const m = media[0];
           if (m.type === "video") {
-            const res = await telegramClient.sendVideo(targetChannel, m.url, content);
-            publishedId = String(res.message_id || publishedId);
+            const res = await telegramClient.sendVideo(targetChannel, m.url, caption);
+            publishedId = String(res?.message_id || publishedId);
           } else {
-            const res = await telegramClient.sendPhoto(targetChannel, m.url, content);
-            publishedId = String(res.message_id || publishedId);
+            const res = await telegramClient.sendPhoto(targetChannel, m.url, caption);
+            publishedId = String(res?.message_id || publishedId);
           }
         } else if (media.length > 1) {
           const mediaList = media.map((m, idx) => ({
             type: m.type === "video" ? "video" : "photo",
-            url: m.url,
-            caption: idx === 0 ? content : void 0
+            media: m.url,
+            caption: idx === 0 ? caption : void 0
           }));
           const res = await telegramClient.sendMediaGroup(targetChannel, mediaList);
-          publishedId = String(Array.isArray(res) ? res[0]?.message_id : res.message_id || publishedId);
+          publishedId = String(Array.isArray(res) ? res[0]?.message_id : res?.message_id || publishedId);
         } else {
           const res = await telegramClient.sendMessage(targetChannel, content, {
             disable_web_page_preview: false
           });
-          publishedId = String(res.message_id || publishedId);
+          publishedId = String(res?.message_id || publishedId);
+        }
+        if (followUpText && media.length > 0) {
+          await telegramClient.sendMessage(targetChannel, followUpText, {
+            disable_web_page_preview: false
+          });
         }
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         db.logSystem("warn", "telegram_bot", `Telegram delivery note to ${targetChannel}: ${msg}`);
+        throw err;
       }
     } else {
-      db.logSystem("info", "telegram_bot", `Real bot token not yet set; post stored for channel ${targetChannel}`);
+      db.logSystem("info", "telegram_bot", `Telegram bot token not yet configured; post stored for ${targetChannel}`);
     }
     return publishedId;
   }
   async dispatchToX(automation, content, media, threadParts) {
-    const user = db.getUser(automation.userId);
+    const user = db.getUser(automation.userId) || db.getOwner();
     const creds = user?.settings.xCredentials || {};
     let publishedId = `x_${Date.now()}`;
     if (creds.oauth2AccessToken || creds.apiKey && creds.accessToken || creds.bearerToken) {
@@ -1672,7 +1591,7 @@ var AutomationQueue = class {
       db.logSystem(
         "info",
         "x_client",
-        `No Twitter OAuth configured for ${user?.telegramUsername || automation.userId}; post queued & logged.`
+        `No Twitter OAuth configured for personal bot; post logged for destination ${automation.destination}.`
       );
     }
     return publishedId;
@@ -1807,12 +1726,11 @@ var sourceMonitor = new SourceMonitor();
 var userWizards = /* @__PURE__ */ new Map();
 var TelegramBotHandler = class {
   constructor() {
-    this.pollingTimer = null;
     this.isPolling = false;
     this.lastUpdateId = 0;
   }
   /**
-   * Main entry point for both live Telegram Webhook, Long Polling and Web Simulator
+   * Main entry point for live Telegram Webhooks, Long Polling, and Web Simulator
    */
   async handleUpdate(update, isLive = false) {
     if (update.channel_post) {
@@ -1828,11 +1746,13 @@ var TelegramBotHandler = class {
     const firstName = fromUser.first_name || "User";
     let user = db.getUser(tgId);
     if (!user) {
+      const authToken = `tga_${tgId}_${crypto3.randomBytes(8).toString("hex")}`;
       user = db.upsertUser({
-        id: `user_${tgId}`,
+        id: `usr_${tgId}`,
         telegramId: tgId,
         telegramUsername: tgUsername,
         firstName,
+        authToken,
         plan: "free",
         postsProcessedCount: 0,
         postsFailedCount: 0,
@@ -1848,7 +1768,13 @@ var TelegramBotHandler = class {
         createdAt: (/* @__PURE__ */ new Date()).toISOString(),
         lastActiveAt: (/* @__PURE__ */ new Date()).toISOString()
       });
-      db.logSystem("info", "telegram_bot", `New SaaS user registered via Telegram: ${tgUsername} (${tgId})`, user.id);
+      db.logSystem("info", "telegram_bot", `New user registered via /start: ${tgUsername} (${tgId})`, user.id);
+    } else {
+      user.lastActiveAt = (/* @__PURE__ */ new Date()).toISOString();
+      if (!user.authToken) {
+        user.authToken = `tga_${tgId}_${crypto3.randomBytes(8).toString("hex")}`;
+      }
+      db.upsertUser(user);
     }
     let response;
     if (update.callback_query?.data) {
@@ -1880,62 +1806,75 @@ var TelegramBotHandler = class {
           });
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
-          db.logSystem("warn", "telegram_bot", `Live delivery failed for chat ${targetChatId}: ${msg}`);
+          db.logSystem("warn", "telegram_bot", `Live delivery notice for chat ${targetChatId}: ${msg}`);
         }
       }
     }
     return response;
   }
-  /**
-   * Start Long Polling for Telegram Bot updates (automatic when bot token is set)
-   */
   startPolling() {
     if (this.isPolling) return;
-    if (!telegramClient.hasValidToken()) {
-      db.logSystem("info", "telegram_bot", "Telegram bot token not yet configured. Bot will run in Web Simulator mode.");
-      return;
-    }
     this.isPolling = true;
-    db.logSystem("info", "telegram_bot", "Starting real Telegram Bot long-polling worker...");
-    const pollLoop = async () => {
-      while (this.isPolling) {
-        try {
-          const updates = await telegramClient.getUpdates(this.lastUpdateId + 1, 100, 25);
-          if (updates && updates.length > 0) {
-            for (const u of updates) {
-              this.lastUpdateId = u.update_id;
-              await this.handleUpdate(u, true);
+    db.logSystem("info", "telegram_bot", "Telegram Bot long-polling worker started.");
+    const poll = async () => {
+      if (!this.isPolling) return;
+      const token = db.getSettings().botToken;
+      if (!token) {
+        setTimeout(poll, 5e3);
+        return;
+      }
+      try {
+        const url = `https://api.telegram.org/bot${token}/getUpdates?offset=${this.lastUpdateId + 1}&timeout=20`;
+        const res = await fetch(url);
+        const data = await res.json();
+        if (data.ok && Array.isArray(data.result)) {
+          for (const update of data.result) {
+            this.lastUpdateId = Math.max(this.lastUpdateId, update.update_id);
+            try {
+              await this.handleUpdate(update, true);
+            } catch (err) {
+              console.error("[Bot] Error processing update:", err);
             }
           }
-        } catch (err) {
-          if (err.errorCode === 409) {
-            db.logSystem("warn", "telegram_bot", "Telegram webhook is active. Polling paused.");
-            await new Promise((r) => setTimeout(r, 1e4));
-          } else {
-            await new Promise((r) => setTimeout(r, 4e3));
-          }
         }
+      } catch (err) {
       }
+      setTimeout(poll, 1500);
     };
-    pollLoop();
-  }
-  stopPolling() {
-    this.isPolling = false;
+    poll();
   }
   async handleText(user, text) {
     const wizard = userWizards.get(user.id);
     if (wizard && !text.startsWith("/")) {
       return this.handleWizardInput(user, wizard, text);
     }
-    if (text === "/start" || text.toLowerCase() === "menu" || text.toLowerCase() === "start") {
+    if (text.startsWith("/start") || text.toLowerCase() === "menu" || text.toLowerCase() === "start") {
       userWizards.delete(user.id);
       return this.getMainMenu(user);
+    }
+    if (text === "/sync" || text === "\u{1F504} Sync Now") {
+      sourceMonitor.checkSources().catch(() => {
+      });
+      return {
+        text: `\u{1F504} **Immediate Sync Triggered!**
+
+Polling configured X sources now for any new posts. If new content is found, it will be automatically filtered, rewritten, and dispatched!`,
+        replyMarkup: {
+          inline_keyboard: [
+            [{ text: "\u26A1 View Bridges", callback_data: "view_automations" }],
+            [{ text: "\xAB Main Menu", callback_data: "main_menu" }]
+          ]
+        }
+      };
     }
     if (text === "/automations" || text === "\u26A1 My Automations") {
       return this.getAutomationsMenu(user);
     }
-    if (text === "/new" || text === "\u2795 New Automation") {
+    if (text === "/new" || text === "\u2795 New Automation" || text === "\u{1F680} Setup Bridge") {
       return this.startWizard(user);
+    }
+    if (text === "/connect_x" || text === "\u{1F517} Connect X") {
+      return this.getConnectXMenu(user);
     }
     if (text === "/settings" || text === "\u2699\uFE0F Settings") {
       return this.getSettingsMenu(user);
@@ -1950,18 +1889,16 @@ var TelegramBotHandler = class {
       return this.getHelpMenu();
     }
     return {
-      text: `\u{1F44B} Hello ${user.firstName}! I didn't recognize that command.
-
-Use the buttons below to manage your automations, or type /start to reset.`,
+      text: `\u{1F44B} Hello ${user.firstName}! Use the buttons below or send /start anytime to manage your cross-posting:`,
       replyMarkup: {
         inline_keyboard: [
           [
-            { text: "\u26A1 My Automations", callback_data: "view_automations" },
-            { text: "\u2795 New Automation", callback_data: "new_automation_start" }
+            { text: "\u26A1 My Bridges", callback_data: "view_automations" },
+            { text: "\u2795 Set Up Bridge", callback_data: "new_automation_start" }
           ],
           [
-            { text: "\u{1F916} Other Bots", callback_data: "other_bots_view" },
-            { text: "\u2139\uFE0F Setup Guide", callback_data: "help_view" }
+            { text: "\u2699\uFE0F Settings", callback_data: "settings_view" },
+            { text: "\u{1F310} Web Dashboard", url: `${process.env.APP_URL || "http://localhost:3000"}/?auth_token=${user.authToken}` }
           ]
         ]
       }
@@ -1978,6 +1915,9 @@ Use the buttons below to manage your automations, or type /start to reset.`,
     if (data === "new_automation_start") {
       return this.startWizard(user);
     }
+    if (data === "connect_x_view") {
+      return this.getConnectXMenu(user);
+    }
     if (data === "settings_view") {
       return this.getSettingsMenu(user);
     }
@@ -1990,189 +1930,182 @@ Use the buttons below to manage your automations, or type /start to reset.`,
     if (data === "help_view") {
       return this.getHelpMenu();
     }
+    if (data === "toggle_setting_rewrite") {
+      user.settings.autoRewrite = !user.settings.autoRewrite;
+      db.upsertUser(user);
+      return this.getSettingsMenu(user, `AI Rewriter is now ${user.settings.autoRewrite ? "ON" : "OFF"}`);
+    }
+    if (data === "toggle_setting_adfilter") {
+      user.settings.adFilterEnabled = !user.settings.adFilterEnabled;
+      db.upsertUser(user);
+      return this.getSettingsMenu(user, `Spam & Ad Filter is now ${user.settings.adFilterEnabled ? "ON" : "OFF"}`);
+    }
+    if (data === "cycle_setting_format") {
+      const formats = ["auto", "concise", "thread"];
+      const currentIndex = formats.indexOf(user.settings.defaultPostFormat || "auto");
+      user.settings.defaultPostFormat = formats[(currentIndex + 1) % formats.length];
+      db.upsertUser(user);
+      return this.getSettingsMenu(user, `Post Format set to ${user.settings.defaultPostFormat.toUpperCase()}`);
+    }
     if (data === "wiz_dir_x2tg") {
       const wizard = { step: "source", direction: "x_to_telegram" };
       userWizards.set(user.id, wizard);
       return {
-        text: `\u{1F680} **Step 1/3: Select X (Twitter) Source**
+        text: `\u{1F426} **Step 1 of 2: Which X (Twitter) account do you want to monitor?**
 
-Enter the X username/handle you want to monitor (e.g. \`@OpenAI\` or \`@sama\`):
+Please type the X username in the chat below (for example: \`@OpenAI\` or \`@sama\`):
 
-*(Type the handle in chat below)*`,
-        replyMarkup: {
-          inline_keyboard: [
-            [{ text: "Use @techcrunch", callback_data: "wiz_source_techcrunch" }],
-            [{ text: "Use @OpenAI", callback_data: "wiz_source_openai" }],
-            [{ text: "\xAB Cancel", callback_data: "main_menu" }]
-          ]
-        }
-      };
-    }
-    if (data === "wiz_dir_tg2x") {
-      const wizard = { step: "source", direction: "telegram_to_x" };
-      userWizards.set(user.id, wizard);
-      return {
-        text: `\u{1F680} **Step 1/3: Select Source Telegram Channel**
-
-Enter your Telegram channel username or ID (e.g. \`@my_crypto_hub\` or \`-1001234567890\`):
-
-*(Make sure this bot is added as an Administrator to the channel)*`,
-        replyMarkup: {
-          inline_keyboard: [
-            [{ text: "Use @tech_pulse_daily", callback_data: "wiz_source_techpulse" }],
-            [{ text: "\xAB Cancel", callback_data: "main_menu" }]
-          ]
-        }
-      };
-    }
-    if (data.startsWith("wiz_source_")) {
-      const wizard = userWizards.get(user.id);
-      if (wizard) {
-        const sourceMap = {
-          wiz_source_techcrunch: "@techcrunch",
-          wiz_source_openai: "@OpenAI",
-          wiz_source_techpulse: "@tech_pulse_daily"
-        };
-        const source = sourceMap[data] || "@tech_news";
-        wizard.source = source;
-        wizard.step = "destination";
-        return {
-          text: `\u2705 Source set to: **${source}**
-
-\u{1F3AF} **Step 2/3: Set Destination**
-${wizard.direction === "x_to_telegram" ? "Enter your Telegram Channel username (e.g. `@my_news_feed`):" : "Enter your authorized X destination handle (e.g. `@my_x_account`):"}`,
-          replyMarkup: {
-            inline_keyboard: [
-              [{ text: "Use Default Test Channel (@my_feed)", callback_data: "wiz_dest_default" }],
-              [{ text: "\xAB Cancel", callback_data: "main_menu" }]
-            ]
-          }
-        };
-      }
-    }
-    if (data === "wiz_dest_default") {
-      const wizard = userWizards.get(user.id);
-      if (wizard) {
-        wizard.destination = wizard.direction === "x_to_telegram" ? "@my_telegram_channel" : `@${user.telegramUsername.replace("@", "")}_x`;
-        return this.finishWizard(user, wizard);
-      }
-    }
-    if (data.startsWith("toggle_auto_")) {
-      const autoId = data.replace("toggle_auto_", "");
-      const auto = db.getAutomation(autoId, user.id);
-      if (auto) {
-        const newStatus = auto.status === "active" ? "paused" : "active";
-        db.updateAutomation(autoId, user.id, { status: newStatus });
-        return {
-          text: `\u26A1 Automation **${auto.name}** is now **${newStatus.toUpperCase()}**.`,
-          replyMarkup: {
-            inline_keyboard: [
-              [{ text: "\xAB Back to Automations", callback_data: "view_automations" }],
-              [{ text: "\u{1F3E0} Main Menu", callback_data: "main_menu" }]
-            ]
-          }
-        };
-      }
-    }
-    if (data.startsWith("delete_auto_")) {
-      const autoId = data.replace("delete_auto_", "");
-      db.deleteAutomation(autoId, user.id);
-      return {
-        text: `\u{1F5D1}\uFE0F Automation removed successfully.`,
-        replyMarkup: {
-          inline_keyboard: [
-            [{ text: "\xAB Back to Automations", callback_data: "view_automations" }],
-            [{ text: "\u{1F3E0} Main Menu", callback_data: "main_menu" }]
-          ]
-        }
-      };
-    }
-    if (data.startsWith("test_auto_")) {
-      const autoId = data.replace("test_auto_", "");
-      const auto = db.getAutomation(autoId, user.id);
-      if (auto) {
-        const samplePost = {
-          sourcePostId: `test_${Date.now()}`,
-          sourceAuthor: auto.source,
-          sourceContent: `Major milestone reached: autonomous AI agents now reliably execute distributed multi-cloud deployments with strict factual constraints. Zero human intervention needed.`,
-          sourceUrl: `https://x.com/${auto.source.replace("@", "")}/status/${Date.now()}`
-        };
-        const res = automationQueue.enqueuePost(auto, samplePost);
-        return {
-          text: `\u{1F680} Test post enqueued for **${auto.name}**!
-
-Status: ${res.status}
-
-The queue worker will run the post through the Gemini Fact-Preserving Rewriter & Ad Filter, then dispatch to ${auto.destination}.`,
-          replyMarkup: {
-            inline_keyboard: [
-              [{ text: "\u{1F4CA} View My Logs", callback_data: "stats_view" }],
-              [{ text: "\xAB Back to Automations", callback_data: "view_automations" }]
-            ]
-          }
-        };
-      }
-    }
-    if (data.startsWith("bot_click_")) {
-      const botId = data.replace("bot_click_", "");
-      db.recordBotClick(botId);
-      const bots = db.getOtherBots(false);
-      const bot = bots.find((b) => b.id === botId);
-      if (bot) {
-        return {
-          text: `${bot.icon} **${bot.name}** (${bot.username})
-
-${bot.description}
-
-Category: ${bot.category}`,
-          replyMarkup: {
-            inline_keyboard: [
-              [{ text: `\u{1F680} Open ${bot.name}`, url: bot.url }],
-              [{ text: "\xAB Back to Other Bots", callback_data: "other_bots_view" }]
-            ]
-          }
-        };
-      }
-    }
-    return this.getMainMenu(user);
-  }
-  handleWizardInput(user, wizard, text) {
-    if (wizard.step === "source") {
-      wizard.source = text.trim();
-      wizard.step = "destination";
-      return {
-        text: `\u2705 Source set: **${wizard.source}**
-
-\u{1F3AF} **Step 2/3: Set Destination**
-${wizard.direction === "x_to_telegram" ? "Enter your destination Telegram Channel (e.g. `@my_channel_name`):" : "Enter your destination X handle (e.g. `@my_x_handle`):"}`,
+*(No password or API key is required)*`,
         replyMarkup: {
           inline_keyboard: [[{ text: "\xAB Cancel", callback_data: "main_menu" }]]
         }
       };
     }
+    if (data === "wiz_dir_tg2x") {
+      const isConnected = Boolean(user.settings.xCredentials?.oauth2AccessToken);
+      const appUrl = process.env.APP_URL || "http://localhost:3000";
+      const oauthUrl = `${appUrl}/api/auth/x/login?userId=${user.id}`;
+      if (!isConnected) {
+        return {
+          text: `\u{1F4E2} **Step 1 of 2: Connect Your X (Twitter) Account**
+
+To publish from your Telegram channel to X, please authorize your X account with 1-click using official X OAuth 2.0:
+
+\u{1F512} *We never ask for your password or API keys. Authorize securely via twitter.com.*`,
+          replyMarkup: {
+            inline_keyboard: [
+              [{ text: "\u{1F517} Authorize on X (Twitter)", url: oauthUrl }],
+              [{ text: "I have authorized, continue \u2794", callback_data: "wiz_dir_tg2x_authorized" }],
+              [{ text: "\xAB Cancel", callback_data: "main_menu" }]
+            ]
+          }
+        };
+      }
+      return this.proceedToTg2xStep2(user);
+    }
+    if (data === "wiz_dir_tg2x_authorized") {
+      return this.proceedToTg2xStep2(user);
+    }
+    if (data.startsWith("auto_toggle_")) {
+      const autoId = data.replace("auto_toggle_", "");
+      const auto = db.getAutomation(autoId, user.id);
+      if (auto) {
+        const newStatus = auto.status === "active" ? "paused" : "active";
+        db.updateAutomation(autoId, user.id, { status: newStatus });
+        return this.getAutomationsMenu(user, `Automation is now ${newStatus.toUpperCase()}`);
+      }
+    }
+    if (data.startsWith("auto_del_")) {
+      const autoId = data.replace("auto_del_", "");
+      db.deleteAutomation(autoId, user.id);
+      return this.getAutomationsMenu(user, `Automation deleted successfully.`);
+    }
+    return this.getMainMenu(user);
+  }
+  proceedToTg2xStep2(user) {
+    const wizard = { step: "source", direction: "telegram_to_x" };
+    userWizards.set(user.id, wizard);
+    return {
+      text: `\u{1F4E2} **Step 2 of 2: Which Telegram channel do you want to cross-post from?**
+
+1\uFE0F\u20E3 Add this bot as an **Administrator** in your Telegram channel.
+2\uFE0F\u20E3 Send your channel username or link (for example: \`@my_channel\` or \`https://t.me/my_channel\`):
+
+*(Type it in the chat below)*`,
+      replyMarkup: {
+        inline_keyboard: [[{ text: "\xAB Cancel", callback_data: "main_menu" }]]
+      }
+    };
+  }
+  startWizard(user) {
+    userWizards.set(user.id, { step: "direction" });
+    return {
+      text: `\u2795 **Set Up a Cross-Posting Bridge**
+
+Choose the sync direction for this bridge:`,
+      replyMarkup: {
+        inline_keyboard: [
+          [{ text: "\u{1F426} X (Twitter) \u2794 \u{1F4E2} Telegram Channel", callback_data: "wiz_dir_x2tg" }],
+          [{ text: "\u{1F4E2} Telegram Channel \u2794 \u{1F426} X (Twitter)", callback_data: "wiz_dir_tg2x" }],
+          [{ text: "\xAB Back to Menu", callback_data: "main_menu" }]
+        ]
+      }
+    };
+  }
+  async handleWizardInput(user, wizard, text) {
+    const cleanInput = text.trim();
+    if (wizard.step === "source") {
+      if (wizard.direction === "x_to_telegram") {
+        const handle = cleanInput.startsWith("@") ? cleanInput : `@${cleanInput}`;
+        if (!/^@[a-zA-Z0-9_]{1,25}$/.test(handle)) {
+          return {
+            text: `\u26A0\uFE0F Please enter a valid X handle (for example: \`@OpenAI\` or \`@sama\`):`,
+            replyMarkup: { inline_keyboard: [[{ text: "\xAB Cancel", callback_data: "main_menu" }]] }
+          };
+        }
+        wizard.source = handle;
+        wizard.step = "destination";
+        return {
+          text: `\u2705 Source set to: **${handle}**
+
+\u{1F4E2} **Step 2 of 2: Where should new posts be published in Telegram?**
+
+1\uFE0F\u20E3 Add this bot as an **Administrator** in your Telegram channel with *Post Messages* permission.
+2\uFE0F\u20E3 Send your channel username or link below (for example: \`@my_channel\` or \`https://t.me/my_channel\`):`,
+          replyMarkup: { inline_keyboard: [[{ text: "\xAB Cancel", callback_data: "main_menu" }]] }
+        };
+      } else {
+        const parsed = parseTelegramChannelInput(cleanInput);
+        if (!parsed.valid) {
+          return {
+            text: `\u26A0\uFE0F ${parsed.error}
+
+Please enter your channel username (e.g. \`@my_channel\`) or invite link:`,
+            replyMarkup: { inline_keyboard: [[{ text: "\xAB Cancel", callback_data: "main_menu" }]] }
+          };
+        }
+        wizard.source = parsed.canonical;
+        wizard.step = "destination";
+        const userXHandle = user.settings.xCredentials?.accountHandle || user.telegramUsername;
+        wizard.destination = userXHandle;
+        return this.finishWizard(user, wizard);
+      }
+    }
     if (wizard.step === "destination") {
-      wizard.destination = text.trim();
+      let destination = cleanInput;
+      if (wizard.direction === "x_to_telegram") {
+        const parsed = parseTelegramChannelInput(cleanInput);
+        if (!parsed.valid) {
+          return {
+            text: `\u26A0\uFE0F ${parsed.error}
+
+Please enter your channel username (e.g. \`@my_channel\`) or invite link:`,
+            replyMarkup: { inline_keyboard: [[{ text: "\xAB Cancel", callback_data: "main_menu" }]] }
+          };
+        }
+        destination = parsed.canonical;
+      } else {
+        destination = cleanInput.startsWith("@") ? cleanInput : `@${cleanInput}`;
+      }
+      wizard.destination = destination;
       return this.finishWizard(user, wizard);
     }
     return this.getMainMenu(user);
   }
   finishWizard(user, wizard) {
-    const direction = wizard.direction || "x_to_telegram";
-    const source = wizard.source || "@source";
-    const destination = wizard.destination || "@destination";
-    const name = `${source} \u2794 ${destination}`;
+    userWizards.delete(user.id);
     const newAuto = {
       id: `auto_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
       userId: user.id,
-      name,
-      direction,
-      source,
-      destination,
+      name: `${wizard.source} \u2794 ${wizard.destination}`,
+      direction: wizard.direction || "x_to_telegram",
+      source: wizard.source || "",
+      destination: wizard.destination || "",
       status: "active",
       settings: {
-        filterPromotions: true,
-        autoRewrite: true,
-        format: "auto",
+        filterPromotions: user.settings.adFilterEnabled ?? true,
+        autoRewrite: user.settings.autoRewrite ?? true,
+        format: user.settings.defaultPostFormat || "auto",
         includeMedia: true,
         includeOriginalLink: true,
         preserveHashtags: true
@@ -2186,23 +2119,24 @@ ${wizard.direction === "x_to_telegram" ? "Enter your destination Telegram Channe
       updatedAt: (/* @__PURE__ */ new Date()).toISOString()
     };
     db.createAutomation(newAuto);
-    userWizards.delete(user.id);
+    db.logSystem("info", "telegram_bot", `User activated cross-posting bridge: ${newAuto.name}`, user.id);
+    const isXToTg = newAuto.direction === "x_to_telegram";
     return {
-      text: `\u{1F389} **Automation Activated Successfully!**
+      text: `\u{1F389} **Cross-Posting Bridge is Live!**
 
-**Name:** ${name}
-**Direction:** ${direction === "x_to_telegram" ? "X (Twitter) \u2794 Telegram Channel" : "Telegram Channel \u2794 X"}
-**Smart Features:**
-\u2022 \u2728 Fact-Preserving Rewriting: **Enabled**
-\u2022 \u{1F6E1}\uFE0F Ad & Promo Detector: **Active**
-\u2022 \u26A1 Rate-limit protection: **Active**
+\u2022 **Bridge**: ${newAuto.name}
+\u2022 **Direction**: ${isXToTg ? "X (Twitter) \u2794 Telegram" : "Telegram \u2794 X (Twitter)"}
+\u2022 **Status**: \u{1F7E2} **Active**
 
-New posts will be automatically monitored, reformatted, and forwarded!`,
+\u2728 **AI Fact Preservation**: Active (all dates, quotes & numbers preserved)
+\u{1F6E1}\uFE0F **Spam & Ad Filter**: Active (promotional ads & shills automatically blocked)
+\u{1F4F8} **Media Synchronization**: Active (photos, videos & galleries)`,
       replyMarkup: {
         inline_keyboard: [
-          [{ text: "\u{1F9EA} Send Test Post Now", callback_data: `test_auto_${newAuto.id}` }],
-          [{ text: "\u26A1 View All Automations", callback_data: "view_automations" }],
-          [{ text: "\u{1F3E0} Main Menu", callback_data: "main_menu" }]
+          [{ text: "\u26A1 View My Bridges", callback_data: "view_automations" }],
+          [{ text: "\u2795 Set Up Another Bridge", callback_data: "new_automation_start" }],
+          [{ text: "\u{1F310} Open Web Dashboard", url: `${process.env.APP_URL || "http://localhost:3000"}/?auth_token=${user.authToken}` }],
+          [{ text: "\xAB Main Menu", callback_data: "main_menu" }]
         ]
       }
     };
@@ -2210,122 +2144,156 @@ New posts will be automatically monitored, reformatted, and forwarded!`,
   getMainMenu(user) {
     const automations = db.getAutomations(user.id);
     const activeCount = automations.filter((a) => a.status === "active").length;
-    const text = `\u{1F916} **X (Twitter) \u2194 Telegram Automation**
+    const appUrl = process.env.APP_URL || "http://localhost:3000";
+    const webLoginUrl = `${appUrl}/?auth_token=${user.authToken}`;
+    if (automations.length === 0) {
+      return {
+        text: `\u{1F44B} **Welcome, ${user.firstName}!**
 
-Welcome back, **${user.firstName}**!
+\u{1F916} **X (Twitter) \u2194 Telegram Sync Bot**
+I automatically sync your content between X and Telegram channels with:
 
-\u{1F4BC} **Plan:** ${user.plan.toUpperCase()}
-\u26A1 **Active Automations:** ${activeCount} / ${automations.length}
-\u{1F4CA} **Posts Forwarded:** ${user.postsProcessedCount}
-\u{1F6E1}\uFE0F **Ads Blocked:** ${user.postsFilteredAdsCount}
+\u2728 **AI Fact-Preserving Rewrites**: Adapts tone while keeping 100% of facts, quotes, dates, and metrics.
+\u{1F6E1}\uFE0F **Spam & Ad Filter**: Discards token presales, crypto shills, and sponsor ads.
+\u{1F512} **Zero API Keys Required**: Authorize with 1 click or set up public channels directly.
 
-Seamlessly cross-post between X and Telegram channels with strict fact-preserving AI rewriting and promotional spam filtering.`;
+\u{1F680} **Let's set up your first bridge in 2 simple steps:**`,
+        replyMarkup: {
+          inline_keyboard: [
+            [{ text: "\u{1F426} X (Twitter) \u2794 \u{1F4E2} Telegram Channel", callback_data: "wiz_dir_x2tg" }],
+            [{ text: "\u{1F4E2} Telegram Channel \u2794 \u{1F426} X (Twitter)", callback_data: "wiz_dir_tg2x" }],
+            [
+              { text: "\u{1F310} Web Dashboard", url: webLoginUrl },
+              { text: "\u2699\uFE0F Settings", callback_data: "settings_view" }
+            ],
+            [
+              { text: "\u{1F916} Recommended Bots", callback_data: "other_bots_view" },
+              { text: "\u2139\uFE0F How It Works", callback_data: "help_view" }
+            ]
+          ]
+        }
+      };
+    }
     return {
-      text,
+      text: `\u{1F44B} **Welcome back, ${user.firstName}!**
+
+\u{1F4CA} **Your Workspace:**
+\u2022 Active Bridges: **${activeCount} / ${automations.length}**
+\u2022 Posts Processed: **${user.postsProcessedCount || 0}**
+\u2022 Ads Blocked: **${user.postsFilteredAdsCount || 0}**
+
+Select an option below or open your personal Web Dashboard:`,
       replyMarkup: {
         inline_keyboard: [
+          [{ text: "\u26A1 My Bridges", callback_data: "view_automations" }],
+          [{ text: "\u2795 Set Up New Bridge", callback_data: "new_automation_start" }],
           [
-            { text: "\u26A1 My Automations", callback_data: "view_automations" },
-            { text: "\u2795 New Automation", callback_data: "new_automation_start" }
+            { text: "\u{1F310} Open Web Dashboard", url: webLoginUrl },
+            { text: "\u2699\uFE0F Settings", callback_data: "settings_view" }
           ],
           [
-            { text: "\u2699\uFE0F Settings & X Auth", callback_data: "settings_view" },
-            { text: "\u{1F916} Other Bots", callback_data: "other_bots_view" }
+            { text: "\u{1F517} Connect X Account", callback_data: "connect_x_view" },
+            { text: "\u{1F916} Recommended Bots", callback_data: "other_bots_view" }
           ],
-          [
-            { text: "\u{1F4CA} My Stats & Logs", callback_data: "stats_view" },
-            { text: "\u2139\uFE0F Setup Guide", callback_data: "help_view" }
-          ]
+          [{ text: "\u{1F4CA} Statistics", callback_data: "stats_view" }]
         ]
       }
     };
   }
-  getAutomationsMenu(user) {
+  getAutomationsMenu(user, notice) {
     const automations = db.getAutomations(user.id);
+    let text = `${notice ? `\u2139\uFE0F *${notice}*
+
+` : ""}\u26A1 **Your Active Bridges (${automations.length})**
+
+`;
     if (automations.length === 0) {
+      text += `You haven't set up any cross-posting bridges yet.
+
+Click **\u2795 Set Up New Bridge** below to link your first X handle and Telegram channel in 1 minute!`;
       return {
-        text: `\u26A1 **My Automations**
-
-You have no automations configured yet.
-
-Click **\u2795 New Automation** to connect your first X account or Telegram channel in 30 seconds!`,
+        text,
         replyMarkup: {
           inline_keyboard: [
-            [{ text: "\u2795 Create Automation", callback_data: "new_automation_start" }],
+            [{ text: "\u2795 Set Up New Bridge", callback_data: "new_automation_start" }],
             [{ text: "\xAB Main Menu", callback_data: "main_menu" }]
           ]
         }
       };
     }
-    let text = `\u26A1 **Your Automations (${automations.length})**
-
-`;
     const keyboard = [];
     automations.forEach((auto, i) => {
-      const statusIcon = auto.status === "active" ? "\u{1F7E2} Active" : "\u23F8\uFE0F Paused";
-      text += `**${i + 1}. ${auto.name}**
-Status: ${statusIcon} | Processed: ${auto.stats.processedCount} | Ads Skipped: ${auto.stats.skippedAdsCount}
+      const icon = auto.status === "active" ? "\u{1F7E2}" : "\u23F8\uFE0F";
+      text += `${i + 1}. ${icon} **${auto.name}**
+   Processed: ${auto.stats.processedCount} | Blocked Ads: ${auto.stats.skippedAdsCount}
 
 `;
       keyboard.push([
-        {
-          text: `${auto.status === "active" ? "\u23F8\uFE0F Pause" : "\u25B6\uFE0F Resume"} #${i + 1}`,
-          callback_data: `toggle_auto_${auto.id}`
-        },
-        {
-          text: `\u{1F9EA} Test #${i + 1}`,
-          callback_data: `test_auto_${auto.id}`
-        },
-        {
-          text: `\u{1F5D1}\uFE0F Delete`,
-          callback_data: `delete_auto_${auto.id}`
-        }
+        { text: `${auto.status === "active" ? "\u23F8\uFE0F Pause" : "\u25B6\uFE0F Resume"} #${i + 1}`, callback_data: `auto_toggle_${auto.id}` },
+        { text: `\u{1F5D1}\uFE0F Delete #${i + 1}`, callback_data: `auto_del_${auto.id}` }
       ]);
     });
-    keyboard.push([
-      { text: "\u2795 Add Another Automation", callback_data: "new_automation_start" },
-      { text: "\xAB Main Menu", callback_data: "main_menu" }
-    ]);
+    keyboard.push([{ text: "\u2795 Set Up Another Bridge", callback_data: "new_automation_start" }]);
+    keyboard.push([{ text: "\xAB Main Menu", callback_data: "main_menu" }]);
     return { text, replyMarkup: { inline_keyboard: keyboard } };
   }
-  startWizard(user) {
-    userWizards.set(user.id, { step: "direction" });
-    return {
-      text: `\u2795 **Create New Automation**
+  getSettingsMenu(user, notice) {
+    const rewriteOn = user.settings.autoRewrite !== false;
+    const adFilterOn = user.settings.adFilterEnabled !== false;
+    const format = user.settings.defaultPostFormat || "auto";
+    let text = `${notice ? `\u2139\uFE0F *${notice}*
 
-Choose the cross-posting direction:`,
-      replyMarkup: {
-        inline_keyboard: [
-          [{ text: "1\uFE0F\u20E3 X (Twitter) \u2794 Telegram Channel", callback_data: "wiz_dir_x2tg" }],
-          [{ text: "2\uFE0F\u20E3 Telegram Channel \u2794 X (Twitter)", callback_data: "wiz_dir_tg2x" }],
-          [{ text: "\xAB Cancel", callback_data: "main_menu" }]
-        ]
-      }
-    };
-  }
-  getSettingsMenu(user) {
-    const creds = user.settings.xCredentials;
-    const xStatus = creds?.bearerToken || creds?.accessToken ? "\u{1F7E2} Connected" : "\u26AA Not Linked (Using Public Monitored Handles)";
-    const text = `\u2699\uFE0F **Your Isolated Settings & Keys**
+` : ""}\u2699\uFE0F **Your Cross-Posting Settings**
 
-User ID: \`${user.id}\`
-Plan: **${user.plan.toUpperCase()}**
+Tap the buttons below to toggle your content preferences:
 
-**X (Twitter) Authorization:**
-Status: ${xStatus}
-Handle: ${creds?.accountHandle || "None specified"}
-
-**Automated AI Engine:**
-\u2022 Fact-Preserving Rewriter: ${user.settings.autoRewrite ? "\u2705 Enabled" : "\u274C Off"}
-\u2022 Ad & Spam Filter: ${user.settings.adFilterEnabled ? "\u2705 Enabled" : "\u274C Off"}
-\u2022 Strict Fact Verification: ${user.settings.preserveFactsStrict ? "\u2705 Strict" : "Normal"}
-
-*Note: Your API credentials and channel tokens are fully encrypted and isolated strictly to your user ID.*`;
+\u2022 **AI Rewriter**: Rewrites posts naturally while strictly preserving quotes, facts, dates, and claims.
+\u2022 **Ad & Shill Filter**: Automatically detects and skips sponsored posts, token presales, and affiliate links.
+\u2022 **Post Format**: Choose between adaptive auto-sizing, 280-character concise posts, or multi-part threads.`;
     return {
       text,
       replyMarkup: {
         inline_keyboard: [
-          [{ text: "\u2795 Create Automation", callback_data: "new_automation_start" }],
+          [{ text: `\u2728 AI Rewriter: ${rewriteOn ? "\u{1F7E2} ON" : "\u26AA OFF"}`, callback_data: "toggle_setting_rewrite" }],
+          [{ text: `\u{1F6E1}\uFE0F Spam & Ad Filter: ${adFilterOn ? "\u{1F7E2} ON" : "\u26AA OFF"}`, callback_data: "toggle_setting_adfilter" }],
+          [{ text: `\u{1F4DD} Format: ${format.toUpperCase()}`, callback_data: "cycle_setting_format" }],
+          [{ text: "\xAB Main Menu", callback_data: "main_menu" }]
+        ]
+      }
+    };
+  }
+  getConnectXMenu(user) {
+    const isConnected = Boolean(user.settings.xCredentials?.oauth2AccessToken);
+    const appUrl = process.env.APP_URL || "http://localhost:3000";
+    const oauthUrl = `${appUrl}/api/auth/x/login?userId=${user.id}`;
+    const handle = user.settings.xCredentials?.accountHandle;
+    let text = `\u{1F517} **Connect Your X (Twitter) Account**
+
+`;
+    if (isConnected) {
+      text += `\u2705 Your X account is **Connected via OAuth 2.0 PKCE**${handle ? ` (${handle})` : ""}.
+
+You are authorized to post from Telegram to X. No passwords or API keys are stored on our servers.`;
+      return {
+        text,
+        replyMarkup: {
+          inline_keyboard: [
+            [{ text: "\u26A1 View My Bridges", callback_data: "view_automations" }],
+            [{ text: "\xAB Main Menu", callback_data: "main_menu" }]
+          ]
+        }
+      };
+    }
+    text += `To publish posts from Telegram to X, authorize your X account with 1-click using official X OAuth 2.0:
+
+1\uFE0F\u20E3 Tap **Authorize on X (Twitter)** below.
+2\uFE0F\u20E3 Authorize the official sync application.
+3\uFE0F\u20E3 Return here to start publishing!`;
+    return {
+      text,
+      replyMarkup: {
+        inline_keyboard: [
+          [{ text: "\u{1F517} Authorize on X (Twitter)", url: oauthUrl }],
           [{ text: "\xAB Main Menu", callback_data: "main_menu" }]
         ]
       }
@@ -2333,133 +2301,134 @@ Handle: ${creds?.accountHandle || "None specified"}
   }
   getOtherBotsMenu() {
     const bots = db.getOtherBots(true);
-    let text = `\u{1F916} **Recommended Telegram Bots**
+    if (bots.length === 0) {
+      return {
+        text: `\u{1F916} **Recommended Partner Bots**
 
-Explore our suite of specialized Telegram bots:
+There are currently no other partner bots listed.
+
+Featured tools configured by the administrator will appear here.`,
+        replyMarkup: { inline_keyboard: [[{ text: "\xAB Main Menu", callback_data: "main_menu" }]] }
+      };
+    }
+    let text = `\u{1F916} **Recommended Partner Bots (${bots.length})**
+
+Explore tools verified by our team:
 
 `;
     const keyboard = [];
     bots.forEach((bot) => {
-      text += `${bot.icon} **${bot.name}** (${bot.username})
+      text += `${bot.icon || "\u{1F916}"} **${bot.name}**
 ${bot.description}
-Category: \`${bot.category}\`
 
 `;
       keyboard.push([
-        {
-          text: `${bot.icon} Open ${bot.name}`,
-          callback_data: `bot_click_${bot.id}`
-        }
+        { text: `${bot.icon || "\u{1F916}"} Open ${bot.name}`, url: bot.url || `https://t.me/${bot.username.replace("@", "")}` }
       ]);
     });
     keyboard.push([{ text: "\xAB Main Menu", callback_data: "main_menu" }]);
     return { text, replyMarkup: { inline_keyboard: keyboard } };
   }
   getStatsMenu(user) {
-    const posts = db.getPostLogs(user.id, 5);
-    let text = `\u{1F4CA} **My Usage & Forwarding Logs**
-
-`;
-    text += `\u2022 Total Published: **${user.postsProcessedCount}**
-`;
-    text += `\u2022 Promotional Posts Filtered: **${user.postsFilteredAdsCount}**
-`;
-    text += `\u2022 Failed Retries: **${user.postsFailedCount}**
-
-`;
-    text += `**Recent 5 Posts:**
-`;
-    if (posts.length === 0) {
-      text += `_No posts recorded yet. Trigger a test run or wait for live updates._
-`;
-    } else {
-      posts.forEach((p, idx) => {
-        const statusBadge = p.status === "published" ? "\u2705 Published" : p.status === "filtered_ad" ? "\u{1F6E1}\uFE0F Ad Filtered" : "\u26A0\uFE0F " + p.status;
-        const time = new Date(p.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-        text += `${idx + 1}. [${time}] ${statusBadge} - ${p.sourceAuthor}
-"${p.sourceContent.slice(0, 60)}..."
-
-`;
-      });
-    }
+    const automations = db.getAutomations(user.id);
+    const totalProcessed = automations.reduce((acc, a) => acc + a.stats.processedCount, 0);
+    const totalSkippedAds = automations.reduce((acc, a) => acc + a.stats.skippedAdsCount, 0);
+    const totalFailed = automations.reduce((acc, a) => acc + a.stats.failedCount, 0);
     return {
-      text,
+      text: `\u{1F4CA} **Your Processing Statistics**
+
+\u{1F464} Account: **${user.telegramUsername}**
+\u{1F4C5} Member Since: **${new Date(user.createdAt).toLocaleDateString()}**
+
+\u{1F4C8} **Deliveries:**
+\u2022 Active Bridges: **${automations.filter((a) => a.status === "active").length}**
+\u2022 Posts Processed & Published: **${totalProcessed}**
+\u2022 Commercial Ads & Spam Filtered: **${totalSkippedAds}**
+\u2022 Failed Deliveries: **${totalFailed}**
+
+\u{1F4A1} *AI preserves 100% of facts, names, dates, and numbers while removing promotional clutter.*`,
       replyMarkup: {
         inline_keyboard: [
-          [{ text: "\u26A1 My Automations", callback_data: "view_automations" }],
+          [{ text: "\u26A1 View My Bridges", callback_data: "view_automations" }],
           [{ text: "\xAB Main Menu", callback_data: "main_menu" }]
         ]
       }
     };
   }
   getHelpMenu() {
-    const text = `\u2139\uFE0F **Setup Guide: Adding the Bot to Channels**
-
-**1. For X \u2794 Telegram Channel:**
-1. Open your Telegram Channel settings.
-2. Tap **Administrators** \u2794 **Add Admin**.
-3. Search for this bot's username and add it.
-4. Grant **"Post Messages"** permission.
-5. In this bot, create an automation with your channel username (e.g. \`@my_channel\`).
-
-**2. For Telegram \u2794 X:**
-1. Add the bot to your Telegram Channel as Admin.
-2. When you publish a post in your channel, this bot will receive the post.
-3. Long posts are automatically rewritten or converted into threads fitting X 280-char limits.
-
-**3. Smart Ad Filtering:**
-Our built-in Gemini AI automatically detects token shills, affiliate codes, presales, and promo hashtags to keep your channels clean.`;
     return {
-      text,
+      text: `\u2139\uFE0F **Simple Setup Guide**
+
+**1. For X (Twitter) \u2794 Telegram:**
+\u2022 Add this bot as an **Administrator** in your Telegram channel with *Post Messages* permission.
+\u2022 Send /new or tap **\u2795 Set Up Bridge**.
+\u2022 Select *X \u2794 Telegram* and provide the X handle and your channel link.
+
+**2. For Telegram \u2794 X (Twitter):**
+\u2022 Tap **\u{1F517} Connect X Account** to authorize via official X OAuth 2.0.
+\u2022 Add the bot to your Telegram channel.
+\u2022 Posts in your channel will be published to X automatically!
+
+**Commands:**
+/start - Open main menu
+/new - Set up a new cross-posting bridge
+/automations - Manage active bridges
+/settings - Toggle AI rewrite & ad filter
+/otherbots - View recommended partner bots
+/help - Show this guide`,
       replyMarkup: {
         inline_keyboard: [
-          [{ text: "\u2795 Create Automation Now", callback_data: "new_automation_start" }],
+          [{ text: "\u2795 Set Up Bridge Now", callback_data: "new_automation_start" }],
           [{ text: "\xAB Main Menu", callback_data: "main_menu" }]
         ]
       }
     };
   }
-  /**
-   * Broadcast message to all users in database (Admin feature)
-   */
-  async broadcast(messageText, buttonText, buttonUrl) {
+  async broadcast(text, buttonText, buttonUrl) {
     const users = db.getUsers();
-    const settings = db.getSettings();
     let sent = 0;
-    for (const user of users) {
-      if (settings.botToken && !settings.botToken.includes("TODO")) {
-        try {
-          const body = {
-            chat_id: user.telegramId,
-            text: messageText,
-            parse_mode: "Markdown"
-          };
-          if (buttonText && buttonUrl) {
-            body.reply_markup = {
-              inline_keyboard: [[{ text: buttonText, url: buttonUrl }]]
-            };
-          }
-          await fetch(`https://api.telegram.org/bot${settings.botToken}/sendMessage`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(body)
+    let failed = 0;
+    const replyMarkup = buttonText && buttonUrl ? { inline_keyboard: [[{ text: buttonText, url: buttonUrl }]] } : void 0;
+    for (const u of users) {
+      if (!u.telegramId) continue;
+      try {
+        if (telegramClient.hasValidToken()) {
+          await telegramClient.sendMessage(u.telegramId, text, {
+            parse_mode: "Markdown",
+            reply_markup: replyMarkup
           });
           sent++;
-        } catch {
+        } else {
+          sent++;
         }
-      } else {
-        sent++;
+      } catch {
+        failed++;
       }
+      await new Promise((r) => setTimeout(r, 60));
     }
     db.logSystem("info", "telegram_bot", `Broadcast completed: delivered to ${sent}/${users.length} users`);
-    return { sent, total: users.length };
+    return { sent, failed, total: users.length };
   }
 };
 var telegramBot = new TelegramBotHandler();
 
 // server.ts
-var PORT = 3e3;
+var PORT = Number(process.env.PORT) || 3e3;
 var oauthSessions = /* @__PURE__ */ new Map();
+var requireAdmin = (req, res, next) => {
+  const adminKey = req.headers["x-admin-key"] || req.query.adminKey;
+  const configuredKey = process.env.ADMIN_KEY || db.getSettings().adminSecret;
+  if (!configuredKey || configuredKey.trim() === "") {
+    return res.status(500).json({
+      ok: false,
+      error: "ADMIN_KEY is not configured on the server. Please set ADMIN_KEY in your environment variables."
+    });
+  }
+  if (!adminKey || adminKey.trim() !== configuredKey.trim()) {
+    return res.status(401).json({ ok: false, error: "Unauthorized: Invalid or missing ADMIN_KEY" });
+  }
+  next();
+};
 async function startServer() {
   const app = express();
   app.use(express.json());
@@ -2485,7 +2454,7 @@ async function startServer() {
     try {
       const { channelId, botToken } = req.body;
       if (!channelId) {
-        return res.status(400).json({ ok: false, error: "channelId is required" });
+        return res.status(400).json({ ok: false, error: "Channel identifier is required" });
       }
       const result = await telegramClient.verifyChannelPermissions(channelId, botToken);
       res.json({ ok: true, ...result });
@@ -2496,7 +2465,14 @@ async function startServer() {
   });
   app.get("/api/auth/x/login", (req, res) => {
     try {
-      const userId = req.query.userId || "user_alice_tech";
+      const userId = req.query.userId;
+      if (!userId) {
+        return res.status(400).json({ ok: false, error: "Missing userId parameter" });
+      }
+      const user = db.getUser(userId);
+      if (!user) {
+        return res.status(404).json({ ok: false, error: "User not found" });
+      }
       const redirectUri = `${req.protocol}://${req.get("host")}/api/auth/x/callback`;
       const { verifier, challenge } = xClient.generatePKCE();
       const state = `xstate_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
@@ -2521,7 +2497,7 @@ async function startServer() {
     try {
       const { code, state, error, error_description } = req.query;
       if (error) {
-        return res.send(`<html><body><h2>X Authorization Failed</h2><p>${error_description || error}</p><a href="/dashboard">Return to App</a></body></html>`);
+        return res.send(`<html><body style="font-family: sans-serif; padding: 40px; background: #0f172a; color: white;"><h2>X Authorization Failed</h2><p>${error_description || error}</p><a href="/" style="color: #38bdf8;">Return to App</a></body></html>`);
       }
       if (!code || !state) {
         return res.status(400).send("Missing code or state parameter.");
@@ -2546,7 +2522,7 @@ async function startServer() {
           oauth2Scope: tokenResult.scope
         };
         db.upsertUser(user);
-        db.logSystem("success", "api", `User ${user.telegramUsername} successfully linked X account via OAuth2 PKCE`, user.id);
+        db.logSystem("success", "api", `User ${user.telegramUsername} authorized X account via OAuth2 PKCE`, user.id);
       }
       res.send(`
         <!DOCTYPE html>
@@ -2556,7 +2532,7 @@ async function startServer() {
             <div style="text-align: center; max-width: 450px; padding: 32px; background: #1e293b; border-radius: 12px; border: 1px solid #334155;">
               <div style="font-size: 48px; margin-bottom: 16px;">\u{1F389}</div>
               <h2 style="margin: 0 0 8px;">X Account Connected!</h2>
-              <p style="color: #94a3b8; font-size: 14px; margin-bottom: 24px;">Your Twitter/X account is now securely authorized with write permissions for automated cross-posting.</p>
+              <p style="color: #94a3b8; font-size: 14px; margin-bottom: 24px;">Your Twitter/X account is now authorized for automated posting.</p>
               <a href="/?oauth=success" style="display: inline-block; padding: 10px 20px; background: #2563eb; color: white; text-decoration: none; border-radius: 6px; font-weight: 500;">Back to Dashboard</a>
             </div>
             <script>
@@ -2570,7 +2546,7 @@ async function startServer() {
       `);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      res.status(500).send(`<html><body><h2>OAuth Exchange Failed</h2><p>${message}</p><a href="/">Return</a></body></html>`);
+      res.status(500).send(`<html><body style="font-family: sans-serif; padding: 40px; background: #0f172a; color: white;"><h2>OAuth Exchange Failed</h2><p>${message}</p><a href="/" style="color: #38bdf8;">Return</a></body></html>`);
     }
   });
   app.post("/api/auth/x/disconnect", (req, res) => {
@@ -2587,14 +2563,42 @@ async function startServer() {
   app.post("/api/telegram/simulate", async (req, res) => {
     try {
       const { userId, text, callbackData } = req.body;
-      const user = db.getUser(userId || "user_alice_tech") || db.getUsers()[0];
+      let user = userId ? db.getUser(userId) : void 0;
+      if (!user) {
+        user = db.getUsers()[0];
+        if (!user) {
+          const tgId = "10000001";
+          user = db.upsertUser({
+            id: `usr_${tgId}`,
+            telegramId: tgId,
+            telegramUsername: "@telegram_user",
+            firstName: "Demo User",
+            authToken: `tga_${tgId}_init`,
+            plan: "free",
+            postsProcessedCount: 0,
+            postsFailedCount: 0,
+            postsFilteredAdsCount: 0,
+            status: "active",
+            settings: {
+              autoRewrite: true,
+              adFilterEnabled: true,
+              preserveFactsStrict: true,
+              defaultPostFormat: "auto",
+              xCredentials: {}
+            },
+            createdAt: (/* @__PURE__ */ new Date()).toISOString(),
+            lastActiveAt: (/* @__PURE__ */ new Date()).toISOString()
+          });
+        }
+      }
       let updatePayload;
+      const numTgId = parseInt(user.telegramId) || 10000001;
       if (callbackData) {
         updatePayload = {
           callback_query: {
             id: `cb_${Date.now()}`,
             from: {
-              id: parseInt(user.telegramId) || 12345678,
+              id: numTgId,
               username: user.telegramUsername.replace("@", ""),
               first_name: user.firstName
             },
@@ -2606,69 +2610,57 @@ async function startServer() {
           message: {
             message_id: Date.now(),
             from: {
-              id: parseInt(user.telegramId) || 12345678,
+              id: numTgId,
               username: user.telegramUsername.replace("@", ""),
               first_name: user.firstName
             },
-            chat: { id: parseInt(user.telegramId) || 12345678 },
+            chat: { id: numTgId },
             text: text || "/start"
           }
         };
       }
       const response = await telegramBot.handleUpdate(updatePayload);
-      res.json({ ok: true, response });
+      res.json({ ok: true, response, user });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       res.status(500).json({ ok: false, error: message });
     }
   });
-  app.post("/api/telegram/trigger-sample", async (req, res) => {
-    try {
-      const { automationId, userId, content, author, isPromotional, mediaUrl } = req.body;
-      const auto = db.getAutomation(automationId, userId);
-      if (!auto) {
-        return res.status(404).json({ ok: false, error: "Automation not found" });
-      }
-      const postData = {
-        sourcePostId: `post_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
-        sourceAuthor: author || auto.source,
-        sourceContent: content || (isPromotional ? "\u{1F680} URGENT PRESALE: Win $50,000 in free tokens! Connect wallet now at t.co/presale-airdrop before timer expires! 100x guaranteed #ad" : "Anthropic announces Claude 3.7 Sonnet with hybrid reasoning capabilities, combining instant thinking and extended step-by-step mathematical proofs."),
-        sourceUrl: `https://x.com/${(author || auto.source).replace("@", "")}/status/${Date.now()}`,
-        media: mediaUrl ? [
-          {
-            type: "image",
-            url: mediaUrl
-          }
-        ] : []
-      };
-      const result = automationQueue.enqueuePost(auto, postData);
-      res.json({ ok: true, result });
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      res.status(500).json({ ok: false, error: message });
+  app.post("/api/user/auth-by-token", (req, res) => {
+    const { token, telegramId, username } = req.body;
+    let user = null;
+    if (token) {
+      user = db.getUserByToken(token);
     }
-  });
-  app.get("/api/user/users", (req, res) => {
-    const users = db.getUsers();
-    res.json({ ok: true, users });
-  });
-  app.get("/api/user/profile", (req, res) => {
-    const userId = req.query.userId || "user_alice_tech";
-    const user = db.getUser(userId) || db.getUsers()[0];
+    if (!user && telegramId) {
+      user = db.getUser(telegramId);
+    }
+    if (!user && username) {
+      user = db.getUser(username);
+    }
+    if (!user) {
+      return res.status(404).json({ ok: false, error: "User not found for provided credentials" });
+    }
+    user.lastActiveAt = (/* @__PURE__ */ new Date()).toISOString();
+    db.upsertUser(user);
     res.json({ ok: true, user });
   });
-  app.post("/api/user/switch-or-create", (req, res) => {
-    const { username, firstName, plan } = req.body;
-    const cleanUsername = username ? username.startsWith("@") ? username : `@${username}` : `@user_${Date.now().toString().slice(-4)}`;
-    let user = db.getUser(cleanUsername);
+  app.post("/api/user/register-or-login", (req, res) => {
+    const { telegramHandle, firstName } = req.body;
+    if (!telegramHandle) {
+      return res.status(400).json({ ok: false, error: "Telegram handle or ID is required" });
+    }
+    const cleanHandle = telegramHandle.trim().startsWith("@") ? telegramHandle.trim() : `@${telegramHandle.trim()}`;
+    let user = db.getUser(cleanHandle);
     if (!user) {
-      const newId = `user_${Date.now().toString().slice(-6)}`;
+      const generatedTgId = String(Math.floor(1e7 + Math.random() * 9e7));
       user = db.upsertUser({
-        id: newId,
-        telegramId: String(Math.floor(1e7 + Math.random() * 9e7)),
-        telegramUsername: cleanUsername,
-        firstName: firstName || "New Creator",
-        plan: plan || "free",
+        id: `usr_${generatedTgId}`,
+        telegramId: generatedTgId,
+        telegramUsername: cleanHandle,
+        firstName: firstName || cleanHandle.replace("@", ""),
+        authToken: `tga_${generatedTgId}_${Math.random().toString(36).substring(2, 8)}`,
+        plan: "free",
         postsProcessedCount: 0,
         postsFailedCount: 0,
         postsFilteredAdsCount: 0,
@@ -2683,11 +2675,26 @@ async function startServer() {
         createdAt: (/* @__PURE__ */ new Date()).toISOString(),
         lastActiveAt: (/* @__PURE__ */ new Date()).toISOString()
       });
+      db.logSystem("info", "api", `New user registered via Web Gateway: ${cleanHandle}`, user.id);
+    }
+    res.json({ ok: true, user });
+  });
+  app.get("/api/user/profile", (req, res) => {
+    const userId = req.query.userId;
+    const token = req.query.token;
+    let user = null;
+    if (token) user = db.getUserByToken(token);
+    if (!user && userId) user = db.getUser(userId);
+    if (!user) {
+      return res.status(404).json({ ok: false, error: "User not found" });
     }
     res.json({ ok: true, user });
   });
   app.get("/api/user/automations", (req, res) => {
-    const userId = req.query.userId || "user_alice_tech";
+    const userId = req.query.userId;
+    if (!userId) {
+      return res.status(400).json({ ok: false, error: "userId is required" });
+    }
     const automations = db.getAutomations(userId);
     res.json({ ok: true, automations });
   });
@@ -2697,13 +2704,28 @@ async function startServer() {
       if (!userId || !source || !destination) {
         return res.status(400).json({ ok: false, error: "Missing required parameters" });
       }
+      const user = db.getUser(userId);
+      if (!user) {
+        return res.status(404).json({ ok: false, error: "User not found" });
+      }
+      let cleanSource = source.trim();
+      let cleanDestination = destination.trim();
+      if (direction === "x_to_telegram") {
+        if (!cleanSource.startsWith("@")) cleanSource = `@${cleanSource}`;
+        const parsed = parseTelegramChannelInput(cleanDestination);
+        if (parsed.valid) cleanDestination = parsed.canonical;
+      } else {
+        const parsed = parseTelegramChannelInput(cleanSource);
+        if (parsed.valid) cleanSource = parsed.canonical;
+        if (!cleanDestination.startsWith("@")) cleanDestination = `@${cleanDestination}`;
+      }
       const created = db.createAutomation({
         id: `auto_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
         userId,
-        name: name || `${source} \u2794 ${destination}`,
+        name: name || `${cleanSource} \u2794 ${cleanDestination}`,
         direction: direction || "x_to_telegram",
-        source,
-        destination,
+        source: cleanSource,
+        destination: cleanDestination,
         status: "active",
         settings: {
           filterPromotions: true,
@@ -2722,6 +2744,7 @@ async function startServer() {
         createdAt: (/* @__PURE__ */ new Date()).toISOString(),
         updatedAt: (/* @__PURE__ */ new Date()).toISOString()
       });
+      db.logSystem("info", "api", `Created automation ${created.name}`, userId);
       res.json({ ok: true, automation: created });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -2764,11 +2787,11 @@ async function startServer() {
             lastSeenPostId: tweets[0].id,
             lastPollAt: (/* @__PURE__ */ new Date()).toISOString()
           });
-          return res.json({ ok: true, syncedCount: tweets.length, message: `Found and queued ${tweets.length} new tweets!` });
+          return res.json({ ok: true, syncedCount: tweets.length, message: `Queued ${tweets.length} new tweets for processing!` });
         }
-        return res.json({ ok: true, syncedCount: 0, message: "Source checked. No new posts since last sync." });
+        return res.json({ ok: true, syncedCount: 0, message: "Source checked. No new posts since last poll." });
       } else {
-        return res.json({ ok: true, syncedCount: 0, message: "Telegram channel automations listen continuously for new broadcasts." });
+        return res.json({ ok: true, syncedCount: 0, message: "Channel automations continuously listen for new posts." });
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -2778,6 +2801,9 @@ async function startServer() {
   app.delete("/api/user/automations/:id", (req, res) => {
     const { id } = req.params;
     const userId = req.query.userId || req.body.userId;
+    if (!userId) {
+      return res.status(400).json({ ok: false, error: "userId is required" });
+    }
     const success = db.deleteAutomation(id, userId);
     res.json({ ok: success });
   });
@@ -2791,9 +2817,20 @@ async function startServer() {
   });
   app.get("/api/user/logs", (req, res) => {
     const userId = req.query.userId;
+    if (!userId) {
+      return res.status(400).json({ ok: false, error: "userId is required" });
+    }
     const limit = parseInt(req.query.limit) || 50;
     const logs = db.getPostLogs(userId, limit);
     res.json({ ok: true, logs });
+  });
+  app.get("/api/other-bots", (req, res) => {
+    const bots = db.getOtherBots(true);
+    res.json({ ok: true, bots });
+  });
+  app.post("/api/other-bots/:id/click", (req, res) => {
+    db.recordBotClick(req.params.id);
+    res.json({ ok: true });
   });
   app.post("/api/pipeline/test", async (req, res) => {
     try {
@@ -2821,17 +2858,25 @@ async function startServer() {
       res.status(500).json({ ok: false, error: message });
     }
   });
-  app.get("/api/admin/stats", (req, res) => {
+  app.post("/api/admin/verify-key", (req, res) => {
+    const { adminKey } = req.body;
+    const configuredKey = process.env.ADMIN_KEY || db.getSettings().adminSecret || "admin_secret_key";
+    if (!adminKey || adminKey.trim() !== configuredKey.trim()) {
+      return res.status(401).json({ ok: false, error: "Invalid ADMIN_KEY" });
+    }
+    res.json({ ok: true });
+  });
+  app.get("/api/admin/stats", requireAdmin, (req, res) => {
     const stats = db.getSystemStats();
     stats.queuePendingCount = automationQueue.getPendingCount();
     res.json({ ok: true, stats });
   });
-  app.get("/api/admin/logs", (req, res) => {
+  app.get("/api/admin/logs", requireAdmin, (req, res) => {
     const limit = parseInt(req.query.limit) || 100;
     const logs = db.getSystemLogs(limit);
     res.json({ ok: true, logs });
   });
-  app.post("/api/admin/broadcast", async (req, res) => {
+  app.post("/api/admin/broadcast", requireAdmin, async (req, res) => {
     try {
       const { text, buttonText, buttonUrl } = req.body;
       if (!text) return res.status(400).json({ ok: false, error: "Broadcast text required" });
@@ -2842,35 +2887,39 @@ async function startServer() {
       res.status(500).json({ ok: false, error: message });
     }
   });
-  app.get("/api/admin/other-bots", (req, res) => {
+  app.get("/api/admin/other-bots", requireAdmin, (req, res) => {
     const bots = db.getOtherBots(false);
     res.json({ ok: true, bots });
   });
-  app.post("/api/admin/other-bots", (req, res) => {
+  app.post("/api/admin/other-bots", requireAdmin, (req, res) => {
     try {
       const { name, username, description, category, url, icon, badge, enabled, order } = req.body;
+      if (!name || !username) {
+        return res.status(400).json({ ok: false, error: "Name and Username are required" });
+      }
       const cleanUsername = username.startsWith("@") ? username : `@${username}`;
       const bot = db.upsertOtherBot({
         id: `bot_${Date.now()}_${Math.random().toString(36).substring(2, 5)}`,
         name,
         username: cleanUsername,
-        description,
+        description: description || "",
         category: category || "Utilities",
         url: url || `https://t.me/${cleanUsername.replace("@", "")}`,
         icon: icon || "\u{1F916}",
-        badge,
+        badge: badge || "",
         enabled: enabled !== false,
         clicksCount: 0,
-        order: order || 1,
+        order: Number(order) || 1,
         createdAt: (/* @__PURE__ */ new Date()).toISOString()
       });
+      db.logSystem("info", "api", `Admin added new bot: ${bot.name} (${bot.username})`);
       res.json({ ok: true, bot });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       res.status(500).json({ ok: false, error: message });
     }
   });
-  app.put("/api/admin/other-bots/:id", (req, res) => {
+  app.put("/api/admin/other-bots/:id", requireAdmin, (req, res) => {
     const { id } = req.params;
     const existing = db.getOtherBots(false).find((b) => b.id === id);
     if (!existing) return res.status(404).json({ ok: false, error: "Bot not found" });
@@ -2879,14 +2928,16 @@ async function startServer() {
       ...req.body,
       id
     });
+    db.logSystem("info", "api", `Admin updated bot: ${updated.name}`);
     res.json({ ok: true, bot: updated });
   });
-  app.delete("/api/admin/other-bots/:id", (req, res) => {
+  app.delete("/api/admin/other-bots/:id", requireAdmin, (req, res) => {
     const { id } = req.params;
     const success = db.deleteOtherBot(id);
+    db.logSystem("info", "api", `Admin deleted bot ID: ${id}`);
     res.json({ ok: success });
   });
-  app.get("/api/admin/settings", (req, res) => {
+  app.get("/api/admin/settings", requireAdmin, (req, res) => {
     const settings = db.getSettings();
     const masked = {
       ...settings,
@@ -2894,16 +2945,17 @@ async function startServer() {
     };
     res.json({ ok: true, settings: masked });
   });
-  app.post("/api/admin/settings", (req, res) => {
-    const { botToken, botUsername, webhookUrl } = req.body;
+  app.post("/api/admin/settings", requireAdmin, (req, res) => {
+    const { botToken, botUsername, webhookUrl, adminSecret } = req.body;
     const updated = db.updateSettings({
       ...botToken !== void 0 && { botToken },
       ...botUsername !== void 0 && { botUsername },
-      ...webhookUrl !== void 0 && { webhookUrl }
+      ...webhookUrl !== void 0 && { webhookUrl },
+      ...adminSecret !== void 0 && { adminSecret }
     });
     res.json({ ok: true, settings: updated });
   });
-  app.post("/api/admin/telegram-test", async (req, res) => {
+  app.post("/api/admin/telegram-test", requireAdmin, async (req, res) => {
     try {
       const { botToken, webhookUrl } = req.body;
       const token = botToken || db.getSettings().botToken;
@@ -2938,6 +2990,7 @@ async function startServer() {
       res.sendFile(path2.join(distPath, "index.html"));
     });
   } else {
+    const { createServer: createViteServer } = await import("vite");
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: "spa"
