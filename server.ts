@@ -633,9 +633,13 @@ async function startServer() {
 
   app.get('/api/admin/settings', requireAdmin, (req, res) => {
     const settings = db.getSettings();
+    const botStatus = telegramBot.getBotStatus();
     const masked = {
       ...settings,
       botTokenMasked: settings.botToken ? `${settings.botToken.slice(0, 7)}...${settings.botToken.slice(-4)}` : '',
+      isTokenUnauthorized: botStatus.isTokenUnauthorized,
+      isPolling: botStatus.isPolling,
+      hasToken: botStatus.hasToken,
     };
     res.json({ ok: true, settings: masked });
   });
@@ -648,35 +652,51 @@ async function startServer() {
       ...(webhookUrl !== undefined && { webhookUrl }),
       ...(adminSecret !== undefined && { adminSecret }),
     });
+    if (botToken) {
+      telegramBot.wakeUpPolling(botToken);
+    }
     res.json({ ok: true, settings: updated });
   });
 
   app.post('/api/admin/telegram-test', requireAdmin, async (req, res) => {
     try {
-      const { botToken, webhookUrl } = req.body;
-      const token = botToken || db.getSettings().botToken;
+      const { botToken } = req.body;
+      const token = (botToken || telegramClient.getActiveToken()).trim();
       if (!token) {
-        return res.status(400).json({ ok: false, error: 'No Telegram bot token provided' });
+        return res.status(400).json({ ok: false, error: 'No Telegram bot token provided. Please enter a valid BotFather token.' });
       }
 
       // 1. Test getMe
       const meRes = await fetch(`https://api.telegram.org/bot${token}/getMe`);
       const meJson = (await meRes.json()) as any;
       if (!meJson.ok) {
-        return res.status(400).json({ ok: false, error: `Telegram Error: ${meJson.description}` });
+        const desc = meJson.description || 'Unknown error';
+        if (meJson.error_code === 401 || meRes.status === 401) {
+          return res.status(400).json({
+            ok: false,
+            error: 'Telegram API 401: Unauthorized. The token is invalid, wrong, or was revoked by @BotFather. Generate a fresh token in @BotFather.',
+          });
+        }
+        return res.status(400).json({ ok: false, error: `Telegram Error [${meJson.error_code || meRes.status}]: ${desc}` });
       }
 
-      // 2. Set Webhook if requested
-      let webhookStatus = null;
-      if (webhookUrl) {
-        const hookRes = await fetch(`https://api.telegram.org/bot${token}/setWebhook?url=${encodeURIComponent(webhookUrl)}`);
-        webhookStatus = await hookRes.json();
+      // Save token if verified
+      if (botToken) {
+        db.updateSettings({ botToken });
       }
+
+      // Ensure webhook is removed so long-polling operates cleanly
+      try {
+        await telegramClient.deleteWebhook(false, token);
+      } catch {}
+
+      // Wake up bot polling with verified token
+      telegramBot.wakeUpPolling(token);
 
       res.json({
         ok: true,
         botInfo: meJson.result,
-        webhookStatus,
+        message: `Connected successfully as @${meJson.result?.username}`,
       });
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);

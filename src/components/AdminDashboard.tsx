@@ -48,6 +48,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = () => {
   const [webhookUrl, setWebhookUrl] = useState('');
   const [isTestingTelegram, setIsTestingTelegram] = useState(false);
   const [telegramStatus, setTelegramStatus] = useState<any>(null);
+  const [isTokenUnauthorized, setIsTokenUnauthorized] = useState(false);
 
   // Other Bot Modal
   const [showBotModal, setShowBotModal] = useState(false);
@@ -159,6 +160,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = () => {
           setBotToken(data.settings.botTokenMasked);
         }
         setWebhookUrl(data.settings.webhookUrl || `${window.location.origin}/api/telegram/webhook`);
+        setIsTokenUnauthorized(Boolean(data.settings.isTokenUnauthorized));
       }
     } catch (err) {
       console.error('Failed to fetch settings:', err);
@@ -205,15 +207,19 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = () => {
         method: 'POST',
         headers: getHeaders(),
         body: JSON.stringify({
-          botToken: botToken.includes('...') ? undefined : botToken,
-          webhookUrl,
+          botToken: botToken.includes('...') ? undefined : botToken.trim(),
         }),
       });
       const data = await res.json();
       setTelegramStatus(data);
       if (data.ok) {
+        setIsTokenUnauthorized(false);
         fetchSettings();
         fetchSystemLogs();
+      } else {
+        if (data.error?.includes('401') || data.error?.toLowerCase().includes('unauthorized')) {
+          setIsTokenUnauthorized(true);
+        }
       }
     } catch {
       setTelegramStatus({ ok: false, error: 'Connection check failed' });
@@ -626,41 +632,70 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = () => {
 
       {/* 3. Telegram Bot Connection Test */}
       <div className="bg-slate-900 border border-slate-800 rounded-3xl p-6">
-        <div className="flex items-center space-x-2 text-indigo-400 mb-4">
-          <Radio className="w-4 h-4" />
-          <h3 className="text-sm font-bold text-white">Telegram Gateway & Webhook Diagnostics</h3>
+        <div className="flex items-center justify-between mb-4">
+          <div className="flex items-center space-x-2 text-indigo-400">
+            <Radio className="w-4 h-4" />
+            <h3 className="text-sm font-bold text-white">Telegram Gateway & Bot Connection</h3>
+          </div>
+          {isTokenUnauthorized ? (
+            <span className="inline-flex items-center space-x-1 px-2.5 py-1 rounded-full text-[11px] font-semibold bg-rose-500/15 text-rose-400 border border-rose-500/30">
+              <AlertTriangle className="w-3 h-3" />
+              <span>Token Unauthorized (401)</span>
+            </span>
+          ) : botToken ? (
+            <span className="inline-flex items-center space-x-1 px-2.5 py-1 rounded-full text-[11px] font-semibold bg-emerald-500/15 text-emerald-400 border border-emerald-500/30">
+              <CheckCircle2 className="w-3 h-3" />
+              <span>Configured</span>
+            </span>
+          ) : (
+            <span className="inline-flex items-center space-x-1 px-2.5 py-1 rounded-full text-[11px] font-semibold bg-slate-800 text-slate-400 border border-slate-700">
+              <span>Not Configured</span>
+            </span>
+          )}
         </div>
+
+        {isTokenUnauthorized && (
+          <div className="mb-4 p-3.5 rounded-2xl bg-rose-500/10 border border-rose-500/20 text-rose-300 text-xs flex items-start space-x-2.5">
+            <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
+            <div>
+              <span className="font-bold">Telegram Token Revoked or Invalid (HTTP 401):</span> The current bot token cannot authenticate with the Telegram Bot API. Open <span className="font-semibold text-white">@BotFather</span> on Telegram to obtain or regenerate your Bot Token, paste it below, and click <span className="font-semibold text-white">"Connect & Verify"</span>.
+            </div>
+          </div>
+        )}
 
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4 items-end">
           <div>
-            <label className="block text-xs font-semibold text-slate-300 mb-1">Bot Token</label>
+            <label className="block text-xs font-semibold text-slate-300 mb-1">Bot Token (from @BotFather)</label>
             <input
               type="text"
               value={botToken}
-              onChange={(e) => setBotToken(e.target.value)}
+              onChange={(e) => {
+                setBotToken(e.target.value);
+                if (isTokenUnauthorized) setIsTokenUnauthorized(false);
+              }}
               placeholder="123456789:ABCdefGHIjklMNOpqrSTUvwxYZ..."
               className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2 text-xs text-white placeholder-slate-600 font-mono"
             />
           </div>
 
           <div>
-            <label className="block text-xs font-semibold text-slate-300 mb-1">Webhook URL</label>
-            <div className="flex items-center space-x-2">
-              <input
-                type="text"
-                value={webhookUrl}
-                onChange={(e) => setWebhookUrl(e.target.value)}
-                placeholder="https://..."
-                className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2 text-xs text-white placeholder-slate-600 font-mono"
-              />
-              <button
-                onClick={handleTestTelegram}
-                disabled={isTestingTelegram}
-                className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white rounded-xl text-xs font-semibold whitespace-nowrap"
-              >
-                {isTestingTelegram ? 'Testing...' : 'Test Connection'}
-              </button>
-            </div>
+            <button
+              onClick={handleTestTelegram}
+              disabled={isTestingTelegram}
+              className="w-full sm:w-auto px-5 py-2.5 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white rounded-xl text-xs font-semibold whitespace-nowrap flex items-center justify-center space-x-2 transition-colors"
+            >
+              {isTestingTelegram ? (
+                <>
+                  <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                  <span>Verifying with Telegram...</span>
+                </>
+              ) : (
+                <>
+                  <CheckCircle2 className="w-3.5 h-3.5" />
+                  <span>Connect & Verify Bot</span>
+                </>
+              )}
+            </button>
           </div>
         </div>
 

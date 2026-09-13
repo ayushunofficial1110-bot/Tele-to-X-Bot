@@ -34,11 +34,15 @@ export function parseTelegramChannelInput(input: string): {
     return { valid: true, canonical: `@${publicWebMatch[1]}` };
   }
 
-  // 3. Numeric ID (e.g. -1001234567890 or -12345678)
+  // 3. Numeric ID (e.g. -1001234567890 or -12345678 or direct user ID 123456789)
   if (/^-100\d{7,16}$/.test(trimmed)) {
     return { valid: true, canonical: trimmed };
   }
-  if (/^-\d{7,16}$/.test(trimmed)) {
+  if (/^-\d{5,16}$/.test(trimmed)) {
+    return { valid: true, canonical: trimmed };
+  }
+  // Pure numeric user / private chat ID (e.g. 123456789)
+  if (/^\d{5,16}$/.test(trimmed)) {
     return { valid: true, canonical: trimmed };
   }
 
@@ -47,8 +51,8 @@ export function parseTelegramChannelInput(input: string): {
     return { valid: true, canonical: trimmed };
   }
 
-  // 5. Standard username without @ (e.g. tech_news_hub)
-  if (/^[a-zA-Z0-9_]{5,32}$/.test(trimmed)) {
+  // 5. Standard username without @ (e.g. tech_news_hub) - must contain at least one letter
+  if (/^[a-zA-Z0-9_]{5,32}$/.test(trimmed) && /[a-zA-Z]/.test(trimmed)) {
     return { valid: true, canonical: `@${trimmed}` };
   }
 
@@ -61,10 +65,17 @@ export function parseTelegramChannelInput(input: string): {
 }
 
 export class TelegramClient {
+  public getActiveToken(overrideToken?: string): string {
+    const adminToken = db.getSettings().botToken?.trim();
+    const envToken = process.env.TELEGRAM_BOT_TOKEN?.trim();
+    const token = overrideToken?.trim() || adminToken || envToken || '';
+    return token.trim();
+  }
+
   private getBotToken(overrideToken?: string): string {
-    const token = overrideToken || process.env.TELEGRAM_BOT_TOKEN || db.getSettings().botToken;
+    const token = this.getActiveToken(overrideToken);
     if (!token || token.trim() === '' || token.includes('TODO')) {
-      throw new Error('Telegram Bot Token is not configured. Set TELEGRAM_BOT_TOKEN in .env or configure in Admin Panel.');
+      throw new Error('Telegram Bot Token is not configured. Set TELEGRAM_BOT_TOKEN in environment or configure in Admin Panel.');
     }
     return token.trim();
   }
@@ -76,6 +87,31 @@ export class TelegramClient {
     } catch {
       return false;
     }
+  }
+
+  public async answerCallbackQuery(
+    callbackQueryId: string,
+    text?: string,
+    showAlert = false,
+    overrideToken?: string
+  ): Promise<any> {
+    try {
+      return await this.callApi(
+        'answerCallbackQuery',
+        {
+          callback_query_id: callbackQueryId,
+          text,
+          show_alert: showAlert,
+        },
+        overrideToken
+      );
+    } catch {
+      return null;
+    }
+  }
+
+  public async getWebhookInfo(overrideToken?: string): Promise<any> {
+    return this.callApi('getWebhookInfo', {}, overrideToken);
   }
 
   private async callApi(endpoint: string, payload: any, overrideToken?: string): Promise<any> {
@@ -352,8 +388,8 @@ export class TelegramClient {
     );
   }
 
-  public async deleteWebhook(overrideToken?: string): Promise<any> {
-    return this.callApi('deleteWebhook', { drop_pending_updates: false }, overrideToken);
+  public async deleteWebhook(dropPendingUpdates = false, overrideToken?: string): Promise<any> {
+    return this.callApi('deleteWebhook', { drop_pending_updates: dropPendingUpdates }, overrideToken);
   }
 
   public async getUpdates(offset?: number, limit = 100, timeout = 30, overrideToken?: string): Promise<any[]> {

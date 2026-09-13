@@ -1,16 +1,16 @@
 {
   "users": [
     {
+      "_id": "6aa67435f14c9374637d9593",
       "id": "usr_7040484183",
-      "telegramId": "7040484183",
-      "telegramUsername": "@ayush2k",
-      "firstName": "AYUSH SRIVASTAV",
       "authToken": "tga_7040484183_7b736796917d1819",
+      "createdAt": "2026-09-12T19:07:23.394Z",
+      "firstName": "AYUSH SRIVASTAV",
+      "lastActiveAt": "2026-09-13T10:21:11.459Z",
       "plan": "free",
-      "postsProcessedCount": 0,
       "postsFailedCount": 0,
       "postsFilteredAdsCount": 0,
-      "status": "active",
+      "postsProcessedCount": 0,
       "settings": {
         "autoRewrite": true,
         "adFilterEnabled": true,
@@ -18,14 +18,168 @@
         "defaultPostFormat": "auto",
         "xCredentials": {}
       },
-      "createdAt": "2026-09-12T19:07:23.394Z",
-      "lastActiveAt": "2026-09-13T09:06:13.456Z"
+      "status": "active",
+      "telegramId": "7040484183",
+      "telegramUsername": "@ayush2k"
     }
   ],
   "automations": [],
   "posts": [],
   "otherBots": [],
   "systemLogs": [
+    {
+      "id": "syslog_1789294871460_8mh",
+      "timestamp": "2026-09-13T10:21:11.460Z",
+      "level": "info",
+      "source": "telegram_bot",
+      "message": "Processing /start command from @ayush2k (7040484183)"
+    },
+    {
+      "id": "syslog_1789294869927_sxw",
+      "timestamp": "2026-09-13T10:21:09.927Z",
+      "level": "info",
+      "source": "mongodb",
+      "message": "Hydrated from MongoDB: 1 users, 0 automations, 0 bots.",
+      "_id": "6aa67915a3e43d6572069c80"
+    },
+    {
+      "id": "syslog_1789294868546_bi4",
+      "timestamp": "2026-09-13T10:21:08.546Z",
+      "level": "warn",
+      "source": "telegram_bot",
+      "message": "Telegram Bot Token (89087...zWoc) returned HTTP 401 Unauthorized. Polling paused until a valid token is provided in Admin Settings.",
+      "_id": "6aa67914a3e43d6572069c7f"
+    },
+    {
+      "id": "syslog_1789294868189_smd",
+      "timestamp": "2026-09-13T10:21:08.189Z",
+      "level": "success",
+      "source": "mongodb",
+      "message": "Connected to real MongoDB instance: mongodb+srv://newsworldcollab_db_user:****@telegram2insta.aqim0u5.mongodb.net/?appName=Telegram2Insta",
+      "_id": "6aa67914a3e43d6572069c7e"
+    },
+    {
+      "id": "syslog_1789294867062_rge",
+      "timestamp": "2026-09-13T10:21:07.062Z",
+      "level": "info",
+      "source": "telegram_bot",
+      "message": "Telegram Bot long-polling worker started."
+    },
+    {
+      "id": "syslog_1789294586892_d91",
+      "timestamp": "2026-09-13T10:16:26.892Z",
+      "level": "info",
+      "source": "mongodb",
+      "message": "Hydrated from MongoDB: 1 users, 0 automations, 0 bots.",
+      "_id": "6aa677faed56bbce2883d92d"
+    },
+    {
+      "id": "syslog_1789294585176_dnx",
+      "timestamp": "2026-09-13T10:16:25.176Z",
+      "level": "success",
+      "source": "mongodb",
+      "message": "Connected to real MongoDB instance: mongodb+srv://newsworldcollab_db_user:****@telegram2insta.aqim0u5.mongodb.net/?appName=Telegram2Insta",
+      "_id": "6aa677f9ed56bbce2883d92c"
+    },
+    {
+      "id": "syslog_1789294584035_9fn",
+      "timestamp": "2026-09-13T10:16:24.035Z",
+      "level": "info",
+      "source": "telegram_bot",
+      "message": "Telegram Bot long-polling worker started."
+    },
+    {
+      "id": "syslog_1789294581463_ghu",
+      "timestamp": "2026-09-13T10:16:21.463Z",
+      "level": "info",
+      "source": "mongodb",
+      "message": "Hydrated from MongoDB: 1 users, 0 automations, 0 bots."
+    },
+    {
+      "id": "syslog_1789294579758_6rt",
+      "timestamp": "2026-09-13T10:16:19.758Z",
+      "level": "success",
+      "source": "mongodb",
+      "message": "Connected to real MongoDB instance: mongodb+srv://newsworldcollab_db_user:****@telegram2insta.aqim0u5.mongodb.net/?appName=Telegram2Insta",
+      "_id": "6aa677f3d28251a94b3ecb4b"
+    },
+    {
+      "id": "syslog_1789294578623_a5c",
+      "timestamp": "2026-09-13T10:16:18.623Z",
+      "level": "info",
+      "source": "telegram_bot",
+      "message": "Telegram Bot long-polling worker started."
+    },
+    {
+      "id": "syslog_1789292296988_96s",
+      "timestamp": "2026-09-13T09:38:16.988Z",
+      "level": "warn",
+      "source": "mongodb",
+      "message": "Could not connect to MongoDB (C03CBDC92E7F0000:error:0A000438:SSL routines:ssl3_read_bytes:tlsv1 alert internal error:../deps/openssl/openssl/ssl/record/rec_layer_s3.c:918:SSL alert number 80\n). Falling back to persistent local storage."
+    },
+    {
+      "id": "syslog_1789292289218_z7p",
+      "timestamp": "2026-09-13T09:38:09.218Z",
+      "level": "info",
+      "source": "telegram_bot",
+      "message": "Telegram Bot long-polling worker started."
+    },
+    {
+      "id": "syslog_1789292000117_sa2",
+      "timestamp": "2026-09-13T09:33:20.117Z",
+      "level": "info",
+      "source": "telegram_bot",
+      "message": "Telegram Bot long-polling worker started."
+    },
+    {
+      "id": "syslog_1789291999078_1ph",
+      "timestamp": "2026-09-13T09:33:19.079Z",
+      "level": "info",
+      "source": "mongodb",
+      "message": "MONGODB_URI not configured. Operating in persistent file-backed mode (data/db.json)."
+    },
+    {
+      "id": "syslog_1789291921688_5m4",
+      "timestamp": "2026-09-13T09:32:01.688Z",
+      "level": "info",
+      "source": "telegram_bot",
+      "message": "Telegram Bot long-polling worker started."
+    },
+    {
+      "id": "syslog_1789291920653_x8f",
+      "timestamp": "2026-09-13T09:32:00.653Z",
+      "level": "info",
+      "source": "mongodb",
+      "message": "MONGODB_URI not configured. Operating in persistent file-backed mode (data/db.json)."
+    },
+    {
+      "id": "syslog_1789291836033_yph",
+      "timestamp": "2026-09-13T09:30:36.033Z",
+      "level": "info",
+      "source": "telegram_bot",
+      "message": "Telegram Bot long-polling worker started."
+    },
+    {
+      "id": "syslog_1789291835011_l16",
+      "timestamp": "2026-09-13T09:30:35.011Z",
+      "level": "info",
+      "source": "mongodb",
+      "message": "MONGODB_URI not configured. Operating in persistent file-backed mode (data/db.json)."
+    },
+    {
+      "id": "syslog_1789290775460_uk3",
+      "timestamp": "2026-09-13T09:12:55.460Z",
+      "level": "info",
+      "source": "telegram_bot",
+      "message": "Telegram Bot long-polling worker started."
+    },
+    {
+      "id": "syslog_1789290774320_a2c",
+      "timestamp": "2026-09-13T09:12:54.320Z",
+      "level": "info",
+      "source": "mongodb",
+      "message": "MONGODB_URI not configured. Operating in persistent file-backed mode (data/db.json)."
+    },
     {
       "id": "syslog_1789290741406_9kh",
       "timestamp": "2026-09-13T09:12:21.406Z",
@@ -141,11 +295,11 @@
     }
   ],
   "settings": {
-    "botToken": "",
+    "botToken": "8908718104:AAGudMG8sOMREVPgeU2YYfPa-EZjJxPzWoc",
     "botUsername": "X2TelegramBot",
     "webhookUrl": "http://localhost:3000/api/telegram/webhook",
     "isWebhookActive": false,
-    "adminSecret": "",
+    "adminSecret": "ShreeHarivansh@8887",
     "autoProcessSampleQueue": true
   }
 }

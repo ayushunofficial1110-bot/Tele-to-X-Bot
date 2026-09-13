@@ -130,7 +130,14 @@ class Database {
       if (automations.length > 0) this.data.automations = automations;
       if (posts.length > 0) this.data.posts = posts;
       if (otherBots.length > 0) this.data.otherBots = otherBots;
-      if (settingsDoc?.settings) this.data.settings = { ...DEFAULT_SETTINGS, ...settingsDoc.settings };
+      if (settingsDoc?.settings) {
+        this.data.settings = {
+          ...DEFAULT_SETTINGS,
+          ...settingsDoc.settings,
+          botToken: (settingsDoc.settings.botToken || process.env.TELEGRAM_BOT_TOKEN || '').trim(),
+          adminSecret: (settingsDoc.settings.adminSecret || process.env.ADMIN_KEY || '').trim(),
+        };
+      }
 
       this.persistLocal();
       this.logSystem(
@@ -512,6 +519,14 @@ class Database {
   // --- Settings ---
 
   public getSettings(): SystemSettings {
+    const envToken = (process.env.TELEGRAM_BOT_TOKEN || '').trim();
+    if (envToken && (!this.data.settings.botToken || this.data.settings.botToken.trim() === '')) {
+      this.data.settings.botToken = envToken;
+    }
+    const envAdmin = (process.env.ADMIN_KEY || '').trim();
+    if (envAdmin && (!this.data.settings.adminSecret || this.data.settings.adminSecret.trim() === '')) {
+      this.data.settings.adminSecret = envAdmin;
+    }
     return this.data.settings;
   }
 

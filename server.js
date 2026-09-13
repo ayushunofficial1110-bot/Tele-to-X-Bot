@@ -91,7 +91,14 @@ var Database = class {
       if (automations.length > 0) this.data.automations = automations;
       if (posts.length > 0) this.data.posts = posts;
       if (otherBots.length > 0) this.data.otherBots = otherBots;
-      if (settingsDoc?.settings) this.data.settings = { ...DEFAULT_SETTINGS, ...settingsDoc.settings };
+      if (settingsDoc?.settings) {
+        this.data.settings = {
+          ...DEFAULT_SETTINGS,
+          ...settingsDoc.settings,
+          botToken: (settingsDoc.settings.botToken || process.env.TELEGRAM_BOT_TOKEN || "").trim(),
+          adminSecret: (settingsDoc.settings.adminSecret || process.env.ADMIN_KEY || "").trim()
+        };
+      }
       this.persistLocal();
       this.logSystem(
         "info",
@@ -381,6 +388,14 @@ var Database = class {
   }
   // --- Settings ---
   getSettings() {
+    const envToken = (process.env.TELEGRAM_BOT_TOKEN || "").trim();
+    if (envToken && (!this.data.settings.botToken || this.data.settings.botToken.trim() === "")) {
+      this.data.settings.botToken = envToken;
+    }
+    const envAdmin = (process.env.ADMIN_KEY || "").trim();
+    if (envAdmin && (!this.data.settings.adminSecret || this.data.settings.adminSecret.trim() === "")) {
+      this.data.settings.adminSecret = envAdmin;
+    }
     return this.data.settings;
   }
   updateSettings(patch) {
@@ -448,13 +463,16 @@ function parseTelegramChannelInput(input) {
   if (/^-100\d{7,16}$/.test(trimmed)) {
     return { valid: true, canonical: trimmed };
   }
-  if (/^-\d{7,16}$/.test(trimmed)) {
+  if (/^-\d{5,16}$/.test(trimmed)) {
+    return { valid: true, canonical: trimmed };
+  }
+  if (/^\d{5,16}$/.test(trimmed)) {
     return { valid: true, canonical: trimmed };
   }
   if (/^@[a-zA-Z0-9_]{5,32}$/.test(trimmed)) {
     return { valid: true, canonical: trimmed };
   }
-  if (/^[a-zA-Z0-9_]{5,32}$/.test(trimmed)) {
+  if (/^[a-zA-Z0-9_]{5,32}$/.test(trimmed) && /[a-zA-Z]/.test(trimmed)) {
     return { valid: true, canonical: `@${trimmed}` };
   }
   return {
@@ -464,10 +482,16 @@ function parseTelegramChannelInput(input) {
   };
 }
 var TelegramClient = class {
+  getActiveToken(overrideToken) {
+    const adminToken = db.getSettings().botToken?.trim();
+    const envToken = process.env.TELEGRAM_BOT_TOKEN?.trim();
+    const token = overrideToken?.trim() || adminToken || envToken || "";
+    return token.trim();
+  }
   getBotToken(overrideToken) {
-    const token = overrideToken || process.env.TELEGRAM_BOT_TOKEN || db.getSettings().botToken;
+    const token = this.getActiveToken(overrideToken);
     if (!token || token.trim() === "" || token.includes("TODO")) {
-      throw new Error("Telegram Bot Token is not configured. Set TELEGRAM_BOT_TOKEN in .env or configure in Admin Panel.");
+      throw new Error("Telegram Bot Token is not configured. Set TELEGRAM_BOT_TOKEN in environment or configure in Admin Panel.");
     }
     return token.trim();
   }
@@ -478,6 +502,24 @@ var TelegramClient = class {
     } catch {
       return false;
     }
+  }
+  async answerCallbackQuery(callbackQueryId, text, showAlert = false, overrideToken) {
+    try {
+      return await this.callApi(
+        "answerCallbackQuery",
+        {
+          callback_query_id: callbackQueryId,
+          text,
+          show_alert: showAlert
+        },
+        overrideToken
+      );
+    } catch {
+      return null;
+    }
+  }
+  async getWebhookInfo(overrideToken) {
+    return this.callApi("getWebhookInfo", {}, overrideToken);
   }
   async callApi(endpoint, payload, overrideToken) {
     const token = this.getBotToken(overrideToken);
@@ -684,8 +726,8 @@ var TelegramClient = class {
       overrideToken
     );
   }
-  async deleteWebhook(overrideToken) {
-    return this.callApi("deleteWebhook", { drop_pending_updates: false }, overrideToken);
+  async deleteWebhook(dropPendingUpdates = false, overrideToken) {
+    return this.callApi("deleteWebhook", { drop_pending_updates: dropPendingUpdates }, overrideToken);
   }
   async getUpdates(offset, limit = 100, timeout = 30, overrideToken) {
     return this.callApi(
@@ -1727,19 +1769,31 @@ var userWizards = /* @__PURE__ */ new Map();
 var TelegramBotHandler = class {
   constructor() {
     this.isPolling = false;
+    this.pollingLoopRunning = false;
     this.lastUpdateId = 0;
+    this.consecutiveErrors = 0;
+    this.isTokenUnauthorized = false;
+    this.lastUnauthorizedToken = "";
   }
   /**
    * Main entry point for live Telegram Webhooks, Long Polling, and Web Simulator
    */
   async handleUpdate(update, isLive = false) {
     if (update.channel_post) {
+      console.log(
+        `[Telegram Bot] Processing channel post update (msg_id=${update.channel_post.message_id}, chat=${update.channel_post.chat?.title || update.channel_post.chat?.id})`
+      );
       sourceMonitor.handleIncomingTelegramChannelPost(update.channel_post);
       return { text: "Channel post received" };
     }
     const fromUser = update.message?.from || update.callback_query?.from;
     if (!fromUser) {
-      return { text: "Invalid update payload" };
+      if (update.my_chat_member) {
+        console.log(
+          `[Telegram Bot] Chat member status updated in chat ${update.my_chat_member.chat?.id}: status=${update.my_chat_member.new_chat_member?.status}`
+        );
+      }
+      return { text: "Update acknowledged" };
     }
     const tgId = String(fromUser.id);
     const tgUsername = fromUser.username ? `@${fromUser.username}` : `@user_${tgId}`;
@@ -1768,6 +1822,7 @@ var TelegramBotHandler = class {
         createdAt: (/* @__PURE__ */ new Date()).toISOString(),
         lastActiveAt: (/* @__PURE__ */ new Date()).toISOString()
       });
+      console.log(`[Telegram Bot] Registered new user from Telegram: ${tgUsername} (${tgId})`);
       db.logSystem("info", "telegram_bot", `New user registered via /start: ${tgUsername} (${tgId})`, user.id);
     } else {
       user.lastActiveAt = (/* @__PURE__ */ new Date()).toISOString();
@@ -1777,71 +1832,231 @@ var TelegramBotHandler = class {
       db.upsertUser(user);
     }
     let response;
+    const text = update.message?.text?.trim() || "";
+    const isStart = text.startsWith("/start") || text.toLowerCase() === "start";
+    const targetChatId = update.message?.chat?.id || update.callback_query?.message?.chat?.id;
+    if (isStart) {
+      console.log(`[Telegram Bot] \u{1F680} Processing /start command from user ${tgUsername} (${tgId}) in chat ${targetChatId}`);
+      db.logSystem("info", "telegram_bot", `Processing /start command from ${tgUsername} (${tgId})`);
+    }
     if (update.callback_query?.data) {
+      console.log(`[Telegram Bot] Handling callback query "${update.callback_query.data}" from user ${tgUsername}`);
       response = await this.handleCallback(user, update.callback_query.data);
       if (isLive && telegramClient.hasValidToken()) {
-        try {
-          await fetch(
-            `https://api.telegram.org/bot${db.getSettings().botToken}/answerCallbackQuery`,
-            {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ callback_query_id: update.callback_query.id })
-            }
-          );
-        } catch {
-        }
+        await telegramClient.answerCallbackQuery(update.callback_query.id);
       }
     } else {
-      const text = update.message?.text?.trim() || "";
       response = await this.handleText(user, text);
     }
-    if (isLive && telegramClient.hasValidToken()) {
-      const targetChatId = update.message?.chat?.id || update.callback_query?.message?.chat?.id;
-      if (targetChatId) {
-        try {
-          await telegramClient.sendMessage(targetChatId, response.text, {
-            parse_mode: "Markdown",
-            reply_markup: response.replyMarkup
-          });
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err);
-          db.logSystem("warn", "telegram_bot", `Live delivery notice for chat ${targetChatId}: ${msg}`);
+    if (isLive && telegramClient.hasValidToken() && targetChatId) {
+      try {
+        const sentResult = await telegramClient.sendMessage(targetChatId, response.text, {
+          parse_mode: "Markdown",
+          reply_markup: response.replyMarkup
+        });
+        if (isStart) {
+          console.log(
+            `[Telegram Bot] \u2705 /start reply successfully sent to user ${tgUsername} (${tgId}) in chat ${targetChatId} (msg_id: ${sentResult?.message_id || "ok"})`
+          );
+          db.logSystem("info", "telegram_bot", `/start reply successfully sent to ${tgUsername} in chat ${targetChatId}`);
         }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.error(`[Telegram Bot] \u274C Live delivery failure for chat ${targetChatId}:`, msg);
+        db.logSystem("warn", "telegram_bot", `Live delivery notice for chat ${targetChatId}: ${msg}`);
       }
     }
     return response;
   }
   startPolling() {
-    if (this.isPolling) return;
+    if (this.isPolling) {
+      console.log("[Telegram Bot] startPolling called, but polling worker is already active.");
+      return;
+    }
     this.isPolling = true;
+    console.log("[Telegram Bot] Initializing Telegram Bot long-polling worker...");
     db.logSystem("info", "telegram_bot", "Telegram Bot long-polling worker started.");
-    const poll = async () => {
-      if (!this.isPolling) return;
-      const token = db.getSettings().botToken;
-      if (!token) {
-        setTimeout(poll, 5e3);
-        return;
+    this.runPollingLoop();
+  }
+  stopPolling() {
+    this.isPolling = false;
+    console.log("[Telegram Bot] Polling worker stopped.");
+  }
+  wakeUpPolling(newToken) {
+    if (newToken) {
+      this.isTokenUnauthorized = false;
+      this.lastUnauthorizedToken = "";
+      this.consecutiveErrors = 0;
+    }
+    if (!this.isPolling) {
+      this.startPolling();
+    }
+  }
+  getBotStatus() {
+    const activeToken = telegramClient.getActiveToken();
+    return {
+      isPolling: this.isPolling,
+      isTokenUnauthorized: this.isTokenUnauthorized,
+      hasToken: Boolean(activeToken && activeToken.length > 10),
+      tokenMasked: activeToken && activeToken.length > 8 ? `${activeToken.slice(0, 5)}...${activeToken.slice(-4)}` : "",
+      lastUpdateId: this.lastUpdateId
+    };
+  }
+  async runPollingLoop() {
+    if (this.pollingLoopRunning) {
+      console.log("[Telegram Bot] Polling loop is already running.");
+      return;
+    }
+    this.pollingLoopRunning = true;
+    let webhookChecked = false;
+    while (this.isPolling) {
+      const token = telegramClient.getActiveToken();
+      if (!token || token.length < 10) {
+        await new Promise((r) => setTimeout(r, 5e3));
+        continue;
+      }
+      if (this.lastUnauthorizedToken && token !== this.lastUnauthorizedToken) {
+        this.isTokenUnauthorized = false;
+        this.lastUnauthorizedToken = "";
+        this.consecutiveErrors = 0;
+        webhookChecked = false;
+      }
+      if (this.isTokenUnauthorized && token === this.lastUnauthorizedToken) {
+        await new Promise((r) => setTimeout(r, 15e3));
+        continue;
+      }
+      if (!webhookChecked) {
+        try {
+          const webhookInfo = await telegramClient.getWebhookInfo(token);
+          if (webhookInfo && webhookInfo.url) {
+            console.log(
+              `[Telegram Bot] Active webhook found (${webhookInfo.url}). Clearing webhook to enable long-polling without losing pending updates...`
+            );
+            await telegramClient.deleteWebhook(false, token);
+            console.log("[Telegram Bot] Webhook deleted successfully.");
+          } else {
+            console.log(
+              `[Telegram Bot] Webhook status verified (clean). Pending updates in queue: ${webhookInfo?.pending_update_count ?? "0"}.`
+            );
+          }
+          webhookChecked = true;
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          console.warn(`[Telegram Bot] Notice during webhook verification: ${msg}`);
+          webhookChecked = true;
+        }
       }
       try {
-        const url = `https://api.telegram.org/bot${token}/getUpdates?offset=${this.lastUpdateId + 1}&timeout=20`;
-        const res = await fetch(url);
-        const data = await res.json();
-        if (data.ok && Array.isArray(data.result)) {
-          for (const update of data.result) {
-            this.lastUpdateId = Math.max(this.lastUpdateId, update.update_id);
+        const payload = {
+          timeout: 25,
+          limit: 100,
+          allowed_updates: ["message", "channel_post", "callback_query", "my_chat_member"]
+        };
+        if (this.lastUpdateId > 0) {
+          payload.offset = this.lastUpdateId + 1;
+        }
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 35e3);
+        const res = await fetch(`https://api.telegram.org/bot${token}/getUpdates`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+          signal: controller.signal
+        });
+        clearTimeout(timeoutId);
+        if (!res.ok) {
+          const status = res.status;
+          const text = await res.text();
+          let json = null;
+          try {
+            json = JSON.parse(text);
+          } catch {
+          }
+          if (status === 401) {
+            this.isTokenUnauthorized = true;
+            this.lastUnauthorizedToken = token;
+            const masked = token.length > 8 ? `${token.slice(0, 5)}...${token.slice(-4)}` : "token";
+            console.warn(
+              `[Telegram Bot] \u26A0\uFE0F Bot token (${masked}) is unauthorized or revoked by @BotFather (HTTP 401). Polling paused. Please provide a valid TELEGRAM_BOT_TOKEN in Admin Settings.`
+            );
+            db.logSystem(
+              "warn",
+              "telegram_bot",
+              `Telegram Bot Token (${masked}) returned HTTP 401 Unauthorized. Polling paused until a valid token is provided in Admin Settings.`
+            );
+            await new Promise((r) => setTimeout(r, 15e3));
+            continue;
+          }
+          if (status === 409) {
+            console.warn("[Telegram Bot] \u26A0\uFE0F Conflict (409): Webhook active or duplicate getUpdates. Clearing webhook...");
             try {
-              await this.handleUpdate(update, true);
-            } catch (err) {
-              console.error("[Bot] Error processing update:", err);
+              await telegramClient.deleteWebhook(false, token);
+            } catch {
+            }
+            await new Promise((r) => setTimeout(r, 3e3));
+            continue;
+          }
+          if (status === 429) {
+            const retryAfter = json?.parameters?.retry_after || 5;
+            console.warn(`[Telegram Bot] \u26A0\uFE0F Rate limited (429). Telegram requested waiting ${retryAfter}s.`);
+            await new Promise((r) => setTimeout(r, retryAfter * 1e3));
+            continue;
+          }
+          console.warn(`[Telegram Bot] Notice: Telegram getUpdates returned status [${status}]: ${json?.description || text}`);
+          this.consecutiveErrors++;
+          const backoff = Math.min(15e3, 2e3 * Math.pow(1.5, this.consecutiveErrors));
+          await new Promise((r) => setTimeout(r, backoff));
+          continue;
+        }
+        const data = await res.json();
+        this.consecutiveErrors = 0;
+        if (data.ok && Array.isArray(data.result)) {
+          const updates = data.result;
+          if (updates.length > 0) {
+            console.log(`[Telegram Bot] \u{1F4E5} Received ${updates.length} update(s) from Telegram.`);
+            for (const update of updates) {
+              const uId = update.update_id;
+              let updateType = "unknown";
+              let senderInfo = "";
+              if (update.message) {
+                const txt = update.message.text ? `"${update.message.text.substring(0, 35)}"` : "(media/attachment)";
+                updateType = `message: ${txt}`;
+                senderInfo = update.message.from?.username ? `@${update.message.from.username}` : `id=${update.message.from?.id}`;
+              } else if (update.channel_post) {
+                updateType = `channel_post: ${update.channel_post.chat?.title || update.channel_post.chat?.id}`;
+                senderInfo = `chat_id=${update.channel_post.chat?.id}`;
+              } else if (update.callback_query) {
+                updateType = `callback_query: "${update.callback_query.data}"`;
+                senderInfo = update.callback_query.from?.username ? `@${update.callback_query.from.username}` : `id=${update.callback_query.from?.id}`;
+              } else if (update.my_chat_member) {
+                updateType = `my_chat_member`;
+                senderInfo = `chat_id=${update.my_chat_member.chat?.id}`;
+              }
+              console.log(`[Telegram Bot] \u26A1 Processing update_id=${uId} [type: ${updateType}] from ${senderInfo}`);
+              this.lastUpdateId = Math.max(this.lastUpdateId, uId);
+              try {
+                await this.handleUpdate(update, true);
+              } catch (err) {
+                const msg = err instanceof Error ? err.message : String(err);
+                console.error(`[Telegram Bot] \u274C Error executing handleUpdate for update_id=${uId}:`, msg);
+              }
             }
           }
         }
+        await new Promise((r) => setTimeout(r, 100));
       } catch (err) {
+        const error = err;
+        if (error?.name === "AbortError") {
+          continue;
+        }
+        const msg = err instanceof Error ? err.message : String(err);
+        this.consecutiveErrors++;
+        const backoff = Math.min(15e3, 1e3 * Math.pow(1.5, this.consecutiveErrors));
+        console.warn(`[Telegram Bot] \u26A0\uFE0F Polling network pause (${msg}). Re-polling in ${Math.round(backoff / 1e3)}s...`);
+        await new Promise((r) => setTimeout(r, backoff));
       }
-      setTimeout(poll, 1500);
-    };
-    poll();
+    }
+    this.pollingLoopRunning = false;
   }
   async handleText(user, text) {
     const wizard = userWizards.get(user.id);
@@ -2939,9 +3154,13 @@ async function startServer() {
   });
   app.get("/api/admin/settings", requireAdmin, (req, res) => {
     const settings = db.getSettings();
+    const botStatus = telegramBot.getBotStatus();
     const masked = {
       ...settings,
-      botTokenMasked: settings.botToken ? `${settings.botToken.slice(0, 7)}...${settings.botToken.slice(-4)}` : ""
+      botTokenMasked: settings.botToken ? `${settings.botToken.slice(0, 7)}...${settings.botToken.slice(-4)}` : "",
+      isTokenUnauthorized: botStatus.isTokenUnauthorized,
+      isPolling: botStatus.isPolling,
+      hasToken: botStatus.hasToken
     };
     res.json({ ok: true, settings: masked });
   });
@@ -2953,29 +3172,42 @@ async function startServer() {
       ...webhookUrl !== void 0 && { webhookUrl },
       ...adminSecret !== void 0 && { adminSecret }
     });
+    if (botToken) {
+      telegramBot.wakeUpPolling(botToken);
+    }
     res.json({ ok: true, settings: updated });
   });
   app.post("/api/admin/telegram-test", requireAdmin, async (req, res) => {
     try {
-      const { botToken, webhookUrl } = req.body;
-      const token = botToken || db.getSettings().botToken;
+      const { botToken } = req.body;
+      const token = (botToken || telegramClient.getActiveToken()).trim();
       if (!token) {
-        return res.status(400).json({ ok: false, error: "No Telegram bot token provided" });
+        return res.status(400).json({ ok: false, error: "No Telegram bot token provided. Please enter a valid BotFather token." });
       }
       const meRes = await fetch(`https://api.telegram.org/bot${token}/getMe`);
       const meJson = await meRes.json();
       if (!meJson.ok) {
-        return res.status(400).json({ ok: false, error: `Telegram Error: ${meJson.description}` });
+        const desc = meJson.description || "Unknown error";
+        if (meJson.error_code === 401 || meRes.status === 401) {
+          return res.status(400).json({
+            ok: false,
+            error: "Telegram API 401: Unauthorized. The token is invalid, wrong, or was revoked by @BotFather. Generate a fresh token in @BotFather."
+          });
+        }
+        return res.status(400).json({ ok: false, error: `Telegram Error [${meJson.error_code || meRes.status}]: ${desc}` });
       }
-      let webhookStatus = null;
-      if (webhookUrl) {
-        const hookRes = await fetch(`https://api.telegram.org/bot${token}/setWebhook?url=${encodeURIComponent(webhookUrl)}`);
-        webhookStatus = await hookRes.json();
+      if (botToken) {
+        db.updateSettings({ botToken });
       }
+      try {
+        await telegramClient.deleteWebhook(false, token);
+      } catch {
+      }
+      telegramBot.wakeUpPolling(token);
       res.json({
         ok: true,
         botInfo: meJson.result,
-        webhookStatus
+        message: `Connected successfully as @${meJson.result?.username}`
       });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
