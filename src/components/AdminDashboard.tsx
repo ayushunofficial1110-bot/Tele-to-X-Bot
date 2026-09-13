@@ -382,7 +382,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = () => {
           </form>
 
           <div className="mt-6 pt-6 border-t border-slate-800 text-[11px] text-slate-500 text-center">
-            Default key is <code className="text-slate-400 font-mono">admin_secret_key</code> if unchanged in environment.
+            Enter the <code className="text-slate-400 font-mono">ADMIN_KEY</code> secret configured in your server environment variables.
           </div>
         </div>
       </div>

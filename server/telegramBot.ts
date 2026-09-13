@@ -287,14 +287,13 @@ export class TelegramBotHandler {
           if (status === 401) {
             this.isTokenUnauthorized = true;
             this.lastUnauthorizedToken = token;
-            const masked = token.length > 8 ? `${token.slice(0, 5)}...${token.slice(-4)}` : 'token';
             console.warn(
-              `[Telegram Bot] ⚠️ Bot token (${masked}) is unauthorized or revoked by @BotFather (HTTP 401). Polling paused. Please provide a valid TELEGRAM_BOT_TOKEN in Admin Settings.`
+              `[Telegram Bot] ⚠️ Configured Bot Token is unauthorized or revoked by @BotFather (HTTP 401). Polling paused. Please set a valid TELEGRAM_BOT_TOKEN environment variable or configure in Admin Settings.`
             );
             db.logSystem(
               'warn',
               'telegram_bot',
-              `Telegram Bot Token (${masked}) returned HTTP 401 Unauthorized. Polling paused until a valid token is provided in Admin Settings.`
+              'Configured Telegram Bot Token returned HTTP 401 Unauthorized. Polling paused until a valid token is provided.'
             );
             await new Promise((r) => setTimeout(r, 15000));
             continue;

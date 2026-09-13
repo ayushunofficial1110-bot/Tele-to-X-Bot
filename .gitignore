@@ -6,3 +6,12 @@ coverage/
 *.log
 .env*
 !.env.example
+
+# Local Database & Runtime State (never commit local data or runtime secrets)
+data/
+*.db
+*.sqlite
+*.sqlite3
+*.tmp*
+db.json
+

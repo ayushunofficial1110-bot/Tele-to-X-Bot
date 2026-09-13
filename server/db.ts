@@ -86,8 +86,7 @@ class Database {
       this.mongoDb = this.mongoClient.db('x2telegram');
       this.isMongoConnected = true;
 
-      const maskedUri = mongoUri.replace(/\/\/([^:]+):([^@]+)@/, '//$1:****@');
-      this.logSystem('success', 'mongodb', `Connected to real MongoDB instance: ${maskedUri}`);
+      this.logSystem('success', 'mongodb', 'Connected to real MongoDB instance.');
 
       // Ensure indexes
       await Promise.all([
@@ -197,8 +196,17 @@ class Database {
       if (!fs.existsSync(DATA_DIR)) {
         fs.mkdirSync(DATA_DIR, { recursive: true });
       }
+      // Zero secrets in db.json: botToken and adminSecret are strictly kept in memory / environment
+      const safeData = {
+        ...dataToSave,
+        settings: {
+          ...dataToSave.settings,
+          botToken: '', // NEVER write secrets or tokens to disk
+          adminSecret: '', // NEVER write secrets or passwords to disk
+        },
+      };
       const tmpPath = `${DB_FILE}.tmp.${Date.now()}`;
-      fs.writeFileSync(tmpPath, JSON.stringify(dataToSave, null, 2), 'utf-8');
+      fs.writeFileSync(tmpPath, JSON.stringify(safeData, null, 2), 'utf-8');
       fs.renameSync(tmpPath, DB_FILE);
     } catch (err) {
       console.error('[DB] Failed to persist data to disk:', err);

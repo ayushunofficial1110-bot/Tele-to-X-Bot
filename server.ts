@@ -543,7 +543,13 @@ async function startServer() {
 
   app.post('/api/admin/verify-key', (req, res) => {
     const { adminKey } = req.body;
-    const configuredKey = process.env.ADMIN_KEY || db.getSettings().adminSecret || 'admin_secret_key';
+    const configuredKey = process.env.ADMIN_KEY || db.getSettings().adminSecret;
+    if (!configuredKey || configuredKey.trim() === '') {
+      return res.status(500).json({
+        ok: false,
+        error: 'ADMIN_KEY is not configured on the server. Please set ADMIN_KEY in your environment variables.',
+      });
+    }
     if (!adminKey || adminKey.trim() !== configuredKey.trim()) {
       return res.status(401).json({ ok: false, error: 'Invalid ADMIN_KEY' });
     }
