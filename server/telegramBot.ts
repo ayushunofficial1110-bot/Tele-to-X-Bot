@@ -1,5 +1,8 @@
+import crypto from 'node:crypto';
 import { db } from './db.ts';
 import { automationQueue } from './queue.ts';
+import { telegramClient, parseTelegramChannelInput } from './telegramClient.ts';
+import { sourceMonitor } from './monitor.ts';
 import { BotUser, Automation, TelegramInlineButton } from '../src/types.ts';
 
 export interface TelegramMessageResponse {
@@ -9,7 +12,7 @@ export interface TelegramMessageResponse {
   };
 }
 
-// In-memory wizard state for multi-step creation
+// In-memory wizard state for multi-step creation in Telegram chat
 interface WizardState {
   step: 'direction' | 'source' | 'destination' | 'confirm';
   direction?: 'x_to_telegram' | 'telegram_to_x';
@@ -21,23 +24,42 @@ interface WizardState {
 const userWizards: Map<string, WizardState> = new Map();
 
 export class TelegramBotHandler {
+  private isPolling = false;
+  private lastUpdateId = 0;
+
   /**
-   * Main entry point for both live Telegram Webhook and Web Simulator
+   * Main entry point for live Telegram Webhooks, Long Polling, and Web Simulator
    */
-  public async handleUpdate(update: {
-    message?: {
-      message_id: number;
-      from: { id: number; username?: string; first_name?: string };
-      chat: { id: number };
-      text?: string;
-    };
-    callback_query?: {
-      id: string;
-      from: { id: number; username?: string; first_name?: string };
-      message?: { message_id: number; chat: { id: number } };
-      data?: string;
-    };
-  }): Promise<TelegramMessageResponse> {
+  public async handleUpdate(
+    update: {
+      update_id?: number;
+      message?: {
+        message_id: number;
+        from: { id: number; username?: string; first_name?: string };
+        chat: { id: number };
+        text?: string;
+      };
+      channel_post?: {
+        message_id: number;
+        chat: { id: number; username?: string; title?: string };
+        text?: string;
+        caption?: string;
+      };
+      callback_query?: {
+        id: string;
+        from: { id: number; username?: string; first_name?: string };
+        message?: { message_id: number; chat: { id: number } };
+        data?: string;
+      };
+    },
+    isLive = false
+  ): Promise<TelegramMessageResponse> {
+    // 0. Channel post detection for Telegram ➔ X automations
+    if (update.channel_post) {
+      sourceMonitor.handleIncomingTelegramChannelPost(update.channel_post);
+      return { text: 'Channel post received' };
+    }
+
     const fromUser = update.message?.from || update.callback_query?.from;
     if (!fromUser) {
       return { text: 'Invalid update payload' };
@@ -47,14 +69,16 @@ export class TelegramBotHandler {
     const tgUsername = fromUser.username ? `@${fromUser.username}` : `@user_${tgId}`;
     const firstName = fromUser.first_name || 'User';
 
-    // 1. Ensure user exists in multi-tenant DB (isolated by user ID)
+    // 1. Automatic User Registration via /start (No admin approval required)
     let user = db.getUser(tgId);
     if (!user) {
+      const authToken = `tga_${tgId}_${crypto.randomBytes(8).toString('hex')}`;
       user = db.upsertUser({
-        id: `user_${tgId}`,
+        id: `usr_${tgId}`,
         telegramId: tgId,
         telegramUsername: tgUsername,
         firstName,
+        authToken,
         plan: 'free',
         postsProcessedCount: 0,
         postsFailedCount: 0,
@@ -70,37 +94,134 @@ export class TelegramBotHandler {
         createdAt: new Date().toISOString(),
         lastActiveAt: new Date().toISOString(),
       });
-      db.logSystem('info', 'telegram_bot', `New SaaS user registered via Telegram: ${tgUsername} (${tgId})`, user.id);
+      db.logSystem('info', 'telegram_bot', `New user registered via /start: ${tgUsername} (${tgId})`, user.id);
+    } else {
+      user.lastActiveAt = new Date().toISOString();
+      if (!user.authToken) {
+        user.authToken = `tga_${tgId}_${crypto.randomBytes(8).toString('hex')}`;
+      }
+      db.upsertUser(user);
     }
+
+    let response: TelegramMessageResponse;
 
     // 2. Handle Callback Query (Inline Keyboard Clicks)
     if (update.callback_query?.data) {
-      return this.handleCallback(user, update.callback_query.data);
+      response = await this.handleCallback(user, update.callback_query.data);
+      if (isLive && telegramClient.hasValidToken()) {
+        try {
+          await fetch(
+            `https://api.telegram.org/bot${db.getSettings().botToken}/answerCallbackQuery`,
+            {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ callback_query_id: update.callback_query.id }),
+            }
+          );
+        } catch {
+          // ignore acknowledge error
+        }
+      }
+    } else {
+      // 3. Handle Text Messages and Commands
+      const text = update.message?.text?.trim() || '';
+      response = await this.handleText(user, text);
     }
 
-    // 3. Handle Text Messages and Commands
-    const text = update.message?.text?.trim() || '';
-    return this.handleText(user, text);
+    // 4. Live Telegram Delivery
+    if (isLive && telegramClient.hasValidToken()) {
+      const targetChatId = update.message?.chat?.id || update.callback_query?.message?.chat?.id;
+      if (targetChatId) {
+        try {
+          await telegramClient.sendMessage(targetChatId, response.text, {
+            parse_mode: 'Markdown',
+            reply_markup: response.replyMarkup,
+          });
+        } catch (err: unknown) {
+          const msg = err instanceof Error ? err.message : String(err);
+          db.logSystem('warn', 'telegram_bot', `Live delivery notice for chat ${targetChatId}: ${msg}`);
+        }
+      }
+    }
+
+    return response;
+  }
+
+  public startPolling() {
+    if (this.isPolling) return;
+    this.isPolling = true;
+
+    db.logSystem('info', 'telegram_bot', 'Telegram Bot long-polling worker started.');
+
+    const poll = async () => {
+      if (!this.isPolling) return;
+
+      const token = db.getSettings().botToken;
+      if (!token) {
+        setTimeout(poll, 5000);
+        return;
+      }
+
+      try {
+        const url = `https://api.telegram.org/bot${token}/getUpdates?offset=${this.lastUpdateId + 1}&timeout=20`;
+        const res = await fetch(url);
+        const data: any = await res.json();
+
+        if (data.ok && Array.isArray(data.result)) {
+          for (const update of data.result) {
+            this.lastUpdateId = Math.max(this.lastUpdateId, update.update_id);
+            try {
+              await this.handleUpdate(update, true);
+            } catch (err) {
+              console.error('[Bot] Error processing update:', err);
+            }
+          }
+        }
+      } catch (err) {
+        // network or timeout pause
+      }
+
+      setTimeout(poll, 1500);
+    };
+
+    poll();
   }
 
   private async handleText(user: BotUser, text: string): Promise<TelegramMessageResponse> {
-    // Check if user is currently in a step-by-step wizard
+    // Check if user is currently inside an onboarding creation wizard
     const wizard = userWizards.get(user.id);
     if (wizard && !text.startsWith('/')) {
       return this.handleWizardInput(user, wizard, text);
     }
 
-    if (text === '/start' || text.toLowerCase() === 'menu' || text.toLowerCase() === 'start') {
+    if (text.startsWith('/start') || text.toLowerCase() === 'menu' || text.toLowerCase() === 'start') {
       userWizards.delete(user.id);
       return this.getMainMenu(user);
+    }
+
+    if (text === '/sync' || text === '🔄 Sync Now') {
+      sourceMonitor.checkSources().catch(() => {});
+      return {
+        text: `🔄 **Immediate Sync Triggered!**\n\nPolling configured X sources now for any new posts. If new content is found, it will be automatically filtered, rewritten, and dispatched!`,
+        replyMarkup: {
+          inline_keyboard: [
+            [{ text: '⚡ View Bridges', callback_data: 'view_automations' }],
+            [{ text: '« Main Menu', callback_data: 'main_menu' }],
+          ],
+        },
+      };
     }
 
     if (text === '/automations' || text === '⚡ My Automations') {
       return this.getAutomationsMenu(user);
     }
 
-    if (text === '/new' || text === '➕ New Automation') {
+    if (text === '/new' || text === '➕ New Automation' || text === '🚀 Setup Bridge') {
       return this.startWizard(user);
+    }
+
+    if (text === '/connect_x' || text === '🔗 Connect X') {
+      return this.getConnectXMenu(user);
     }
 
     if (text === '/settings' || text === '⚙️ Settings') {
@@ -119,18 +240,17 @@ export class TelegramBotHandler {
       return this.getHelpMenu();
     }
 
-    // Fallback response with main navigation
     return {
-      text: `👋 Hello ${user.firstName}! I didn't recognize that command.\n\nUse the buttons below to manage your automations, or type /start to reset.`,
+      text: `👋 Hello ${user.firstName}! Use the buttons below or send /start anytime to manage your cross-posting:`,
       replyMarkup: {
         inline_keyboard: [
           [
-            { text: '⚡ My Automations', callback_data: 'view_automations' },
-            { text: '➕ New Automation', callback_data: 'new_automation_start' },
+            { text: '⚡ My Bridges', callback_data: 'view_automations' },
+            { text: '➕ Set Up Bridge', callback_data: 'new_automation_start' },
           ],
           [
-            { text: '🤖 Other Bots', callback_data: 'other_bots_view' },
-            { text: 'ℹ️ Setup Guide', callback_data: 'help_view' },
+            { text: '⚙️ Settings', callback_data: 'settings_view' },
+            { text: '🌐 Web Dashboard', url: `${process.env.APP_URL || 'http://localhost:3000'}/?auth_token=${user.authToken}` },
           ],
         ],
       },
@@ -151,6 +271,10 @@ export class TelegramBotHandler {
       return this.startWizard(user);
     }
 
+    if (data === 'connect_x_view') {
+      return this.getConnectXMenu(user);
+    }
+
     if (data === 'settings_view') {
       return this.getSettingsMenu(user);
     }
@@ -167,170 +291,161 @@ export class TelegramBotHandler {
       return this.getHelpMenu();
     }
 
-    // Wizard direction selection
+    // Toggle user preferences
+    if (data === 'toggle_setting_rewrite') {
+      user.settings.autoRewrite = !user.settings.autoRewrite;
+      db.upsertUser(user);
+      return this.getSettingsMenu(user, `AI Rewriter is now ${user.settings.autoRewrite ? 'ON' : 'OFF'}`);
+    }
+
+    if (data === 'toggle_setting_adfilter') {
+      user.settings.adFilterEnabled = !user.settings.adFilterEnabled;
+      db.upsertUser(user);
+      return this.getSettingsMenu(user, `Spam & Ad Filter is now ${user.settings.adFilterEnabled ? 'ON' : 'OFF'}`);
+    }
+
+    if (data === 'cycle_setting_format') {
+      const formats: ('auto' | 'concise' | 'thread')[] = ['auto', 'concise', 'thread'];
+      const currentIndex = formats.indexOf(user.settings.defaultPostFormat || 'auto');
+      user.settings.defaultPostFormat = formats[(currentIndex + 1) % formats.length];
+      db.upsertUser(user);
+      return this.getSettingsMenu(user, `Post Format set to ${user.settings.defaultPostFormat.toUpperCase()}`);
+    }
+
+    // Wizard direction selection (Guided onboarding)
     if (data === 'wiz_dir_x2tg') {
       const wizard: WizardState = { step: 'source', direction: 'x_to_telegram' };
       userWizards.set(user.id, wizard);
       return {
-        text: `🚀 **Step 1/3: Select X (Twitter) Source**\n\nEnter the X username/handle you want to monitor (e.g. \`@OpenAI\` or \`@sama\`):\n\n*(Type the handle in chat below)*`,
-        replyMarkup: {
-          inline_keyboard: [
-            [{ text: 'Use @techcrunch', callback_data: 'wiz_source_techcrunch' }],
-            [{ text: 'Use @OpenAI', callback_data: 'wiz_source_openai' }],
-            [{ text: '« Cancel', callback_data: 'main_menu' }],
-          ],
-        },
-      };
-    }
-
-    if (data === 'wiz_dir_tg2x') {
-      const wizard: WizardState = { step: 'source', direction: 'telegram_to_x' };
-      userWizards.set(user.id, wizard);
-      return {
-        text: `🚀 **Step 1/3: Select Source Telegram Channel**\n\nEnter your Telegram channel username or ID (e.g. \`@my_crypto_hub\` or \`-1001234567890\`):\n\n*(Make sure this bot is added as an Administrator to the channel)*`,
-        replyMarkup: {
-          inline_keyboard: [
-            [{ text: 'Use @tech_pulse_daily', callback_data: 'wiz_source_techpulse' }],
-            [{ text: '« Cancel', callback_data: 'main_menu' }],
-          ],
-        },
-      };
-    }
-
-    // Fast-track wizard sources
-    if (data.startsWith('wiz_source_')) {
-      const wizard = userWizards.get(user.id);
-      if (wizard) {
-        const sourceMap: Record<string, string> = {
-          wiz_source_techcrunch: '@techcrunch',
-          wiz_source_openai: '@OpenAI',
-          wiz_source_techpulse: '@tech_pulse_daily',
-        };
-        const source = sourceMap[data] || '@tech_news';
-        wizard.source = source;
-        wizard.step = 'destination';
-        return {
-          text: `✅ Source set to: **${source}**\n\n🎯 **Step 2/3: Set Destination**\n${
-            wizard.direction === 'x_to_telegram'
-              ? 'Enter your Telegram Channel username (e.g. `@my_news_feed`):'
-              : 'Enter your authorized X destination handle (e.g. `@my_x_account`):'
-          }`,
-          replyMarkup: {
-            inline_keyboard: [
-              [{ text: 'Use Default Test Channel (@my_feed)', callback_data: 'wiz_dest_default' }],
-              [{ text: '« Cancel', callback_data: 'main_menu' }],
-            ],
-          },
-        };
-      }
-    }
-
-    if (data === 'wiz_dest_default') {
-      const wizard = userWizards.get(user.id);
-      if (wizard) {
-        wizard.destination = wizard.direction === 'x_to_telegram' ? '@my_telegram_channel' : `@${user.telegramUsername.replace('@', '')}_x`;
-        return this.finishWizard(user, wizard);
-      }
-    }
-
-    // Toggle automation status
-    if (data.startsWith('toggle_auto_')) {
-      const autoId = data.replace('toggle_auto_', '');
-      const auto = db.getAutomation(autoId, user.id);
-      if (auto) {
-        const newStatus = auto.status === 'active' ? 'paused' : 'active';
-        db.updateAutomation(autoId, user.id, { status: newStatus });
-        return {
-          text: `⚡ Automation **${auto.name}** is now **${newStatus.toUpperCase()}**.`,
-          replyMarkup: {
-            inline_keyboard: [
-              [{ text: '« Back to Automations', callback_data: 'view_automations' }],
-              [{ text: '🏠 Main Menu', callback_data: 'main_menu' }],
-            ],
-          },
-        };
-      }
-    }
-
-    // Delete automation
-    if (data.startsWith('delete_auto_')) {
-      const autoId = data.replace('delete_auto_', '');
-      db.deleteAutomation(autoId, user.id);
-      return {
-        text: `🗑️ Automation removed successfully.`,
-        replyMarkup: {
-          inline_keyboard: [
-            [{ text: '« Back to Automations', callback_data: 'view_automations' }],
-            [{ text: '🏠 Main Menu', callback_data: 'main_menu' }],
-          ],
-        },
-      };
-    }
-
-    // Trigger test run on automation
-    if (data.startsWith('test_auto_')) {
-      const autoId = data.replace('test_auto_', '');
-      const auto = db.getAutomation(autoId, user.id);
-      if (auto) {
-        const samplePost = {
-          sourcePostId: `test_${Date.now()}`,
-          sourceAuthor: auto.source,
-          sourceContent: `Major milestone reached: autonomous AI agents now reliably execute distributed multi-cloud deployments with strict factual constraints. Zero human intervention needed.`,
-          sourceUrl: `https://x.com/${auto.source.replace('@', '')}/status/${Date.now()}`,
-        };
-        const res = automationQueue.enqueuePost(auto, samplePost);
-        return {
-          text: `🚀 Test post enqueued for **${auto.name}**!\n\nStatus: ${res.status}\n\nThe queue worker will run the post through the Gemini Fact-Preserving Rewriter & Ad Filter, then dispatch to ${auto.destination}.`,
-          replyMarkup: {
-            inline_keyboard: [
-              [{ text: '📊 View My Logs', callback_data: 'stats_view' }],
-              [{ text: '« Back to Automations', callback_data: 'view_automations' }],
-            ],
-          },
-        };
-      }
-    }
-
-    // Track click on other bot
-    if (data.startsWith('bot_click_')) {
-      const botId = data.replace('bot_click_', '');
-      db.recordBotClick(botId);
-      const bots = db.getOtherBots(false);
-      const bot = bots.find((b) => b.id === botId);
-      if (bot) {
-        return {
-          text: `${bot.icon} **${bot.name}** (${bot.username})\n\n${bot.description}\n\nCategory: ${bot.category}`,
-          replyMarkup: {
-            inline_keyboard: [
-              [{ text: `🚀 Open ${bot.name}`, url: bot.url }],
-              [{ text: '« Back to Other Bots', callback_data: 'other_bots_view' }],
-            ],
-          },
-        };
-      }
-    }
-
-    return this.getMainMenu(user);
-  }
-
-  private handleWizardInput(user: BotUser, wizard: WizardState, text: string): TelegramMessageResponse {
-    if (wizard.step === 'source') {
-      wizard.source = text.trim();
-      wizard.step = 'destination';
-      return {
-        text: `✅ Source set: **${wizard.source}**\n\n🎯 **Step 2/3: Set Destination**\n${
-          wizard.direction === 'x_to_telegram'
-            ? 'Enter your destination Telegram Channel (e.g. `@my_channel_name`):'
-            : 'Enter your destination X handle (e.g. `@my_x_handle`):'
-        }`,
+        text: `🐦 **Step 1 of 2: Which X (Twitter) account do you want to monitor?**\n\nPlease type the X username in the chat below (for example: \`@OpenAI\` or \`@sama\`):\n\n*(No password or API key is required)*`,
         replyMarkup: {
           inline_keyboard: [[{ text: '« Cancel', callback_data: 'main_menu' }]],
         },
       };
     }
 
+    if (data === 'wiz_dir_tg2x') {
+      const isConnected = Boolean(user.settings.xCredentials?.oauth2AccessToken);
+      const appUrl = process.env.APP_URL || 'http://localhost:3000';
+      const oauthUrl = `${appUrl}/api/auth/x/login?userId=${user.id}`;
+
+      if (!isConnected) {
+        return {
+          text: `📢 **Step 1 of 2: Connect Your X (Twitter) Account**\n\nTo publish from your Telegram channel to X, please authorize your X account with 1-click using official X OAuth 2.0:\n\n🔒 *We never ask for your password or API keys. Authorize securely via twitter.com.*`,
+          replyMarkup: {
+            inline_keyboard: [
+              [{ text: '🔗 Authorize on X (Twitter)', url: oauthUrl }],
+              [{ text: 'I have authorized, continue ➔', callback_data: 'wiz_dir_tg2x_authorized' }],
+              [{ text: '« Cancel', callback_data: 'main_menu' }],
+            ],
+          },
+        };
+      }
+
+      return this.proceedToTg2xStep2(user);
+    }
+
+    if (data === 'wiz_dir_tg2x_authorized') {
+      return this.proceedToTg2xStep2(user);
+    }
+
+    if (data.startsWith('auto_toggle_')) {
+      const autoId = data.replace('auto_toggle_', '');
+      const auto = db.getAutomation(autoId, user.id);
+      if (auto) {
+        const newStatus = auto.status === 'active' ? 'paused' : 'active';
+        db.updateAutomation(autoId, user.id, { status: newStatus });
+        return this.getAutomationsMenu(user, `Automation is now ${newStatus.toUpperCase()}`);
+      }
+    }
+
+    if (data.startsWith('auto_del_')) {
+      const autoId = data.replace('auto_del_', '');
+      db.deleteAutomation(autoId, user.id);
+      return this.getAutomationsMenu(user, `Automation deleted successfully.`);
+    }
+
+    return this.getMainMenu(user);
+  }
+
+  private proceedToTg2xStep2(user: BotUser): TelegramMessageResponse {
+    const wizard: WizardState = { step: 'source', direction: 'telegram_to_x' };
+    userWizards.set(user.id, wizard);
+    return {
+      text: `📢 **Step 2 of 2: Which Telegram channel do you want to cross-post from?**\n\n1️⃣ Add this bot as an **Administrator** in your Telegram channel.\n2️⃣ Send your channel username or link (for example: \`@my_channel\` or \`https://t.me/my_channel\`):\n\n*(Type it in the chat below)*`,
+      replyMarkup: {
+        inline_keyboard: [[{ text: '« Cancel', callback_data: 'main_menu' }]],
+      },
+    };
+  }
+
+  private startWizard(user: BotUser): TelegramMessageResponse {
+    userWizards.set(user.id, { step: 'direction' });
+    return {
+      text: `➕ **Set Up a Cross-Posting Bridge**\n\nChoose the sync direction for this bridge:`,
+      replyMarkup: {
+        inline_keyboard: [
+          [{ text: '🐦 X (Twitter) ➔ 📢 Telegram Channel', callback_data: 'wiz_dir_x2tg' }],
+          [{ text: '📢 Telegram Channel ➔ 🐦 X (Twitter)', callback_data: 'wiz_dir_tg2x' }],
+          [{ text: '« Back to Menu', callback_data: 'main_menu' }],
+        ],
+      },
+    };
+  }
+
+  private async handleWizardInput(user: BotUser, wizard: WizardState, text: string): Promise<TelegramMessageResponse> {
+    const cleanInput = text.trim();
+
+    if (wizard.step === 'source') {
+      if (wizard.direction === 'x_to_telegram') {
+        const handle = cleanInput.startsWith('@') ? cleanInput : `@${cleanInput}`;
+        if (!/^@[a-zA-Z0-9_]{1,25}$/.test(handle)) {
+          return {
+            text: `⚠️ Please enter a valid X handle (for example: \`@OpenAI\` or \`@sama\`):`,
+            replyMarkup: { inline_keyboard: [[{ text: '« Cancel', callback_data: 'main_menu' }]] },
+          };
+        }
+        wizard.source = handle;
+        wizard.step = 'destination';
+        return {
+          text: `✅ Source set to: **${handle}**\n\n📢 **Step 2 of 2: Where should new posts be published in Telegram?**\n\n1️⃣ Add this bot as an **Administrator** in your Telegram channel with *Post Messages* permission.\n2️⃣ Send your channel username or link below (for example: \`@my_channel\` or \`https://t.me/my_channel\`):`,
+          replyMarkup: { inline_keyboard: [[{ text: '« Cancel', callback_data: 'main_menu' }]] },
+        };
+      } else {
+        // telegram_to_x
+        const parsed = parseTelegramChannelInput(cleanInput);
+        if (!parsed.valid) {
+          return {
+            text: `⚠️ ${parsed.error}\n\nPlease enter your channel username (e.g. \`@my_channel\`) or invite link:`,
+            replyMarkup: { inline_keyboard: [[{ text: '« Cancel', callback_data: 'main_menu' }]] },
+          };
+        }
+        wizard.source = parsed.canonical;
+        wizard.step = 'destination';
+
+        const userXHandle = user.settings.xCredentials?.accountHandle || user.telegramUsername;
+        wizard.destination = userXHandle;
+
+        return this.finishWizard(user, wizard);
+      }
+    }
+
     if (wizard.step === 'destination') {
-      wizard.destination = text.trim();
+      let destination = cleanInput;
+      if (wizard.direction === 'x_to_telegram') {
+        const parsed = parseTelegramChannelInput(cleanInput);
+        if (!parsed.valid) {
+          return {
+            text: `⚠️ ${parsed.error}\n\nPlease enter your channel username (e.g. \`@my_channel\`) or invite link:`,
+            replyMarkup: { inline_keyboard: [[{ text: '« Cancel', callback_data: 'main_menu' }]] },
+          };
+        }
+        destination = parsed.canonical;
+      } else {
+        destination = cleanInput.startsWith('@') ? cleanInput : `@${cleanInput}`;
+      }
+
+      wizard.destination = destination;
       return this.finishWizard(user, wizard);
     }
 
@@ -338,23 +453,20 @@ export class TelegramBotHandler {
   }
 
   private finishWizard(user: BotUser, wizard: WizardState): TelegramMessageResponse {
-    const direction = wizard.direction || 'x_to_telegram';
-    const source = wizard.source || '@source';
-    const destination = wizard.destination || '@destination';
-    const name = `${source} ➔ ${destination}`;
+    userWizards.delete(user.id);
 
     const newAuto: Automation = {
       id: `auto_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
       userId: user.id,
-      name,
-      direction,
-      source,
-      destination,
+      name: `${wizard.source} ➔ ${wizard.destination}`,
+      direction: wizard.direction || 'x_to_telegram',
+      source: wizard.source || '',
+      destination: wizard.destination || '',
       status: 'active',
       settings: {
-        filterPromotions: true,
-        autoRewrite: true,
-        format: 'auto',
+        filterPromotions: user.settings.adFilterEnabled ?? true,
+        autoRewrite: user.settings.autoRewrite ?? true,
+        format: user.settings.defaultPostFormat || 'auto',
         includeMedia: true,
         includeOriginalLink: true,
         preserveHashtags: true,
@@ -369,17 +481,18 @@ export class TelegramBotHandler {
     };
 
     db.createAutomation(newAuto);
-    userWizards.delete(user.id);
+    db.logSystem('info', 'telegram_bot', `User activated cross-posting bridge: ${newAuto.name}`, user.id);
+
+    const isXToTg = newAuto.direction === 'x_to_telegram';
 
     return {
-      text: `🎉 **Automation Activated Successfully!**\n\n**Name:** ${name}\n**Direction:** ${
-        direction === 'x_to_telegram' ? 'X (Twitter) ➔ Telegram Channel' : 'Telegram Channel ➔ X'
-      }\n**Smart Features:**\n• ✨ Fact-Preserving Rewriting: **Enabled**\n• 🛡️ Ad & Promo Detector: **Active**\n• ⚡ Rate-limit protection: **Active**\n\nNew posts will be automatically monitored, reformatted, and forwarded!`,
+      text: `🎉 **Cross-Posting Bridge is Live!**\n\n• **Bridge**: ${newAuto.name}\n• **Direction**: ${isXToTg ? 'X (Twitter) ➔ Telegram' : 'Telegram ➔ X (Twitter)'}\n• **Status**: 🟢 **Active**\n\n✨ **AI Fact Preservation**: Active (all dates, quotes & numbers preserved)\n🛡️ **Spam & Ad Filter**: Active (promotional ads & shills automatically blocked)\n📸 **Media Synchronization**: Active (photos, videos & galleries)`,
       replyMarkup: {
         inline_keyboard: [
-          [{ text: '🧪 Send Test Post Now', callback_data: `test_auto_${newAuto.id}` }],
-          [{ text: '⚡ View All Automations', callback_data: 'view_automations' }],
-          [{ text: '🏠 Main Menu', callback_data: 'main_menu' }],
+          [{ text: '⚡ View My Bridges', callback_data: 'view_automations' }],
+          [{ text: '➕ Set Up Another Bridge', callback_data: 'new_automation_start' }],
+          [{ text: '🌐 Open Web Dashboard', url: `${process.env.APP_URL || 'http://localhost:3000'}/?auth_token=${user.authToken}` }],
+          [{ text: '« Main Menu', callback_data: 'main_menu' }],
         ],
       },
     };
@@ -388,101 +501,132 @@ export class TelegramBotHandler {
   private getMainMenu(user: BotUser): TelegramMessageResponse {
     const automations = db.getAutomations(user.id);
     const activeCount = automations.filter((a) => a.status === 'active').length;
+    const appUrl = process.env.APP_URL || 'http://localhost:3000';
+    const webLoginUrl = `${appUrl}/?auth_token=${user.authToken}`;
 
-    const text = `🤖 **X (Twitter) ↔ Telegram Automation**\n\nWelcome back, **${user.firstName}**!\n\n💼 **Plan:** ${user.plan.toUpperCase()}\n⚡ **Active Automations:** ${activeCount} / ${automations.length}\n📊 **Posts Forwarded:** ${user.postsProcessedCount}\n🛡️ **Ads Blocked:** ${user.postsFilteredAdsCount}\n\nSeamlessly cross-post between X and Telegram channels with strict fact-preserving AI rewriting and promotional spam filtering.`;
+    // If new user with 0 automations, present the guided welcome onboarding
+    if (automations.length === 0) {
+      return {
+        text: `👋 **Welcome, ${user.firstName}!**\n\n🤖 **X (Twitter) ↔ Telegram Sync Bot**\nI automatically sync your content between X and Telegram channels with:\n\n✨ **AI Fact-Preserving Rewrites**: Adapts tone while keeping 100% of facts, quotes, dates, and metrics.\n🛡️ **Spam & Ad Filter**: Discards token presales, crypto shills, and sponsor ads.\n🔒 **Zero API Keys Required**: Authorize with 1 click or set up public channels directly.\n\n🚀 **Let's set up your first bridge in 2 simple steps:**`,
+        replyMarkup: {
+          inline_keyboard: [
+            [{ text: '🐦 X (Twitter) ➔ 📢 Telegram Channel', callback_data: 'wiz_dir_x2tg' }],
+            [{ text: '📢 Telegram Channel ➔ 🐦 X (Twitter)', callback_data: 'wiz_dir_tg2x' }],
+            [
+              { text: '🌐 Web Dashboard', url: webLoginUrl },
+              { text: '⚙️ Settings', callback_data: 'settings_view' },
+            ],
+            [
+              { text: '🤖 Recommended Bots', callback_data: 'other_bots_view' },
+              { text: 'ℹ️ How It Works', callback_data: 'help_view' },
+            ],
+          ],
+        },
+      };
+    }
 
     return {
-      text,
+      text: `👋 **Welcome back, ${user.firstName}!**\n\n📊 **Your Workspace:**\n• Active Bridges: **${activeCount} / ${automations.length}**\n• Posts Processed: **${user.postsProcessedCount || 0}**\n• Ads Blocked: **${user.postsFilteredAdsCount || 0}**\n\nSelect an option below or open your personal Web Dashboard:`,
       replyMarkup: {
         inline_keyboard: [
+          [{ text: '⚡ My Bridges', callback_data: 'view_automations' }],
+          [{ text: '➕ Set Up New Bridge', callback_data: 'new_automation_start' }],
           [
-            { text: '⚡ My Automations', callback_data: 'view_automations' },
-            { text: '➕ New Automation', callback_data: 'new_automation_start' },
+            { text: '🌐 Open Web Dashboard', url: webLoginUrl },
+            { text: '⚙️ Settings', callback_data: 'settings_view' },
           ],
           [
-            { text: '⚙️ Settings & X Auth', callback_data: 'settings_view' },
-            { text: '🤖 Other Bots', callback_data: 'other_bots_view' },
+            { text: '🔗 Connect X Account', callback_data: 'connect_x_view' },
+            { text: '🤖 Recommended Bots', callback_data: 'other_bots_view' },
           ],
-          [
-            { text: '📊 My Stats & Logs', callback_data: 'stats_view' },
-            { text: 'ℹ️ Setup Guide', callback_data: 'help_view' },
-          ],
+          [{ text: '📊 Statistics', callback_data: 'stats_view' }],
         ],
       },
     };
   }
 
-  private getAutomationsMenu(user: BotUser): TelegramMessageResponse {
+  private getAutomationsMenu(user: BotUser, notice?: string): TelegramMessageResponse {
     const automations = db.getAutomations(user.id);
 
+    let text = `${notice ? `ℹ️ *${notice}*\n\n` : ''}⚡ **Your Active Bridges (${automations.length})**\n\n`;
+
     if (automations.length === 0) {
+      text += `You haven't set up any cross-posting bridges yet.\n\nClick **➕ Set Up New Bridge** below to link your first X handle and Telegram channel in 1 minute!`;
       return {
-        text: `⚡ **My Automations**\n\nYou have no automations configured yet.\n\nClick **➕ New Automation** to connect your first X account or Telegram channel in 30 seconds!`,
+        text,
         replyMarkup: {
           inline_keyboard: [
-            [{ text: '➕ Create Automation', callback_data: 'new_automation_start' }],
+            [{ text: '➕ Set Up New Bridge', callback_data: 'new_automation_start' }],
             [{ text: '« Main Menu', callback_data: 'main_menu' }],
           ],
         },
       };
     }
 
-    let text = `⚡ **Your Automations (${automations.length})**\n\n`;
     const keyboard: TelegramInlineButton[][] = [];
 
     automations.forEach((auto, i) => {
-      const statusIcon = auto.status === 'active' ? '🟢 Active' : '⏸️ Paused';
-      text += `**${i + 1}. ${auto.name}**\nStatus: ${statusIcon} | Processed: ${auto.stats.processedCount} | Ads Skipped: ${auto.stats.skippedAdsCount}\n\n`;
-
+      const icon = auto.status === 'active' ? '🟢' : '⏸️';
+      text += `${i + 1}. ${icon} **${auto.name}**\n   Processed: ${auto.stats.processedCount} | Blocked Ads: ${auto.stats.skippedAdsCount}\n\n`;
       keyboard.push([
-        {
-          text: `${auto.status === 'active' ? '⏸️ Pause' : '▶️ Resume'} #${i + 1}`,
-          callback_data: `toggle_auto_${auto.id}`,
-        },
-        {
-          text: `🧪 Test #${i + 1}`,
-          callback_data: `test_auto_${auto.id}`,
-        },
-        {
-          text: `🗑️ Delete`,
-          callback_data: `delete_auto_${auto.id}`,
-        },
+        { text: `${auto.status === 'active' ? '⏸️ Pause' : '▶️ Resume'} #${i + 1}`, callback_data: `auto_toggle_${auto.id}` },
+        { text: `🗑️ Delete #${i + 1}`, callback_data: `auto_del_${auto.id}` },
       ]);
     });
 
-    keyboard.push([
-      { text: '➕ Add Another Automation', callback_data: 'new_automation_start' },
-      { text: '« Main Menu', callback_data: 'main_menu' },
-    ]);
+    keyboard.push([{ text: '➕ Set Up Another Bridge', callback_data: 'new_automation_start' }]);
+    keyboard.push([{ text: '« Main Menu', callback_data: 'main_menu' }]);
 
     return { text, replyMarkup: { inline_keyboard: keyboard } };
   }
 
-  private startWizard(user: BotUser): TelegramMessageResponse {
-    userWizards.set(user.id, { step: 'direction' });
-    return {
-      text: `➕ **Create New Automation**\n\nChoose the cross-posting direction:`,
-      replyMarkup: {
-        inline_keyboard: [
-          [{ text: '1️⃣ X (Twitter) ➔ Telegram Channel', callback_data: 'wiz_dir_x2tg' }],
-          [{ text: '2️⃣ Telegram Channel ➔ X (Twitter)', callback_data: 'wiz_dir_tg2x' }],
-          [{ text: '« Cancel', callback_data: 'main_menu' }],
-        ],
-      },
-    };
-  }
+  private getSettingsMenu(user: BotUser, notice?: string): TelegramMessageResponse {
+    const rewriteOn = user.settings.autoRewrite !== false;
+    const adFilterOn = user.settings.adFilterEnabled !== false;
+    const format = user.settings.defaultPostFormat || 'auto';
 
-  private getSettingsMenu(user: BotUser): TelegramMessageResponse {
-    const creds = user.settings.xCredentials;
-    const xStatus = creds?.bearerToken || creds?.accessToken ? '🟢 Connected' : '⚪ Not Linked (Using Public Monitored Handles)';
-
-    const text = `⚙️ **Your Isolated Settings & Keys**\n\nUser ID: \`${user.id}\`\nPlan: **${user.plan.toUpperCase()}**\n\n**X (Twitter) Authorization:**\nStatus: ${xStatus}\nHandle: ${creds?.accountHandle || 'None specified'}\n\n**Automated AI Engine:**\n• Fact-Preserving Rewriter: ${user.settings.autoRewrite ? '✅ Enabled' : '❌ Off'}\n• Ad & Spam Filter: ${user.settings.adFilterEnabled ? '✅ Enabled' : '❌ Off'}\n• Strict Fact Verification: ${user.settings.preserveFactsStrict ? '✅ Strict' : 'Normal'}\n\n*Note: Your API credentials and channel tokens are fully encrypted and isolated strictly to your user ID.*`;
+    let text = `${notice ? `ℹ️ *${notice}*\n\n` : ''}⚙️ **Your Cross-Posting Settings**\n\nTap the buttons below to toggle your content preferences:\n\n• **AI Rewriter**: Rewrites posts naturally while strictly preserving quotes, facts, dates, and claims.\n• **Ad & Shill Filter**: Automatically detects and skips sponsored posts, token presales, and affiliate links.\n• **Post Format**: Choose between adaptive auto-sizing, 280-character concise posts, or multi-part threads.`;
 
     return {
       text,
       replyMarkup: {
         inline_keyboard: [
-          [{ text: '➕ Create Automation', callback_data: 'new_automation_start' }],
+          [{ text: `✨ AI Rewriter: ${rewriteOn ? '🟢 ON' : '⚪ OFF'}`, callback_data: 'toggle_setting_rewrite' }],
+          [{ text: `🛡️ Spam & Ad Filter: ${adFilterOn ? '🟢 ON' : '⚪ OFF'}`, callback_data: 'toggle_setting_adfilter' }],
+          [{ text: `📝 Format: ${format.toUpperCase()}`, callback_data: 'cycle_setting_format' }],
+          [{ text: '« Main Menu', callback_data: 'main_menu' }],
+        ],
+      },
+    };
+  }
+
+  private getConnectXMenu(user: BotUser): TelegramMessageResponse {
+    const isConnected = Boolean(user.settings.xCredentials?.oauth2AccessToken);
+    const appUrl = process.env.APP_URL || 'http://localhost:3000';
+    const oauthUrl = `${appUrl}/api/auth/x/login?userId=${user.id}`;
+    const handle = user.settings.xCredentials?.accountHandle;
+
+    let text = `🔗 **Connect Your X (Twitter) Account**\n\n`;
+    if (isConnected) {
+      text += `✅ Your X account is **Connected via OAuth 2.0 PKCE**${handle ? ` (${handle})` : ''}.\n\nYou are authorized to post from Telegram to X. No passwords or API keys are stored on our servers.`;
+      return {
+        text,
+        replyMarkup: {
+          inline_keyboard: [
+            [{ text: '⚡ View My Bridges', callback_data: 'view_automations' }],
+            [{ text: '« Main Menu', callback_data: 'main_menu' }],
+          ],
+        },
+      };
+    }
+
+    text += `To publish posts from Telegram to X, authorize your X account with 1-click using official X OAuth 2.0:\n\n1️⃣ Tap **Authorize on X (Twitter)** below.\n2️⃣ Authorize the official sync application.\n3️⃣ Return here to start publishing!`;
+
+    return {
+      text,
+      replyMarkup: {
+        inline_keyboard: [
+          [{ text: '🔗 Authorize on X (Twitter)', url: oauthUrl }],
           [{ text: '« Main Menu', callback_data: 'main_menu' }],
         ],
       },
@@ -490,54 +634,41 @@ export class TelegramBotHandler {
   }
 
   private getOtherBotsMenu(): TelegramMessageResponse {
+    // Only fetch bots explicitly added and enabled by the administrator from the Admin Panel
     const bots = db.getOtherBots(true);
 
-    let text = `🤖 **Recommended Telegram Bots**\n\nExplore our suite of specialized Telegram bots:\n\n`;
+    if (bots.length === 0) {
+      return {
+        text: `🤖 **Recommended Partner Bots**\n\nThere are currently no other partner bots listed.\n\nFeatured tools configured by the administrator will appear here.`,
+        replyMarkup: { inline_keyboard: [[{ text: '« Main Menu', callback_data: 'main_menu' }]] },
+      };
+    }
+
+    let text = `🤖 **Recommended Partner Bots (${bots.length})**\n\nExplore tools verified by our team:\n\n`;
     const keyboard: TelegramInlineButton[][] = [];
 
     bots.forEach((bot) => {
-      text += `${bot.icon} **${bot.name}** (${bot.username})\n${bot.description}\nCategory: \`${bot.category}\`\n\n`;
+      text += `${bot.icon || '🤖'} **${bot.name}**\n${bot.description}\n\n`;
       keyboard.push([
-        {
-          text: `${bot.icon} Open ${bot.name}`,
-          callback_data: `bot_click_${bot.id}`,
-        },
+        { text: `${bot.icon || '🤖'} Open ${bot.name}`, url: bot.url || `https://t.me/${bot.username.replace('@', '')}` },
       ]);
     });
 
     keyboard.push([{ text: '« Main Menu', callback_data: 'main_menu' }]);
-
     return { text, replyMarkup: { inline_keyboard: keyboard } };
   }
 
   private getStatsMenu(user: BotUser): TelegramMessageResponse {
-    const posts = db.getPostLogs(user.id, 5);
-    let text = `📊 **My Usage & Forwarding Logs**\n\n`;
-    text += `• Total Published: **${user.postsProcessedCount}**\n`;
-    text += `• Promotional Posts Filtered: **${user.postsFilteredAdsCount}**\n`;
-    text += `• Failed Retries: **${user.postsFailedCount}**\n\n`;
-    text += `**Recent 5 Posts:**\n`;
-
-    if (posts.length === 0) {
-      text += `_No posts recorded yet. Trigger a test run or wait for live updates._\n`;
-    } else {
-      posts.forEach((p, idx) => {
-        const statusBadge =
-          p.status === 'published'
-            ? '✅ Published'
-            : p.status === 'filtered_ad'
-            ? '🛡️ Ad Filtered'
-            : '⚠️ ' + p.status;
-        const time = new Date(p.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-        text += `${idx + 1}. [${time}] ${statusBadge} - ${p.sourceAuthor}\n"${p.sourceContent.slice(0, 60)}..."\n\n`;
-      });
-    }
+    const automations = db.getAutomations(user.id);
+    const totalProcessed = automations.reduce((acc, a) => acc + a.stats.processedCount, 0);
+    const totalSkippedAds = automations.reduce((acc, a) => acc + a.stats.skippedAdsCount, 0);
+    const totalFailed = automations.reduce((acc, a) => acc + a.stats.failedCount, 0);
 
     return {
-      text,
+      text: `📊 **Your Processing Statistics**\n\n👤 Account: **${user.telegramUsername}**\n📅 Member Since: **${new Date(user.createdAt).toLocaleDateString()}**\n\n📈 **Deliveries:**\n• Active Bridges: **${automations.filter((a) => a.status === 'active').length}**\n• Posts Processed & Published: **${totalProcessed}**\n• Commercial Ads & Spam Filtered: **${totalSkippedAds}**\n• Failed Deliveries: **${totalFailed}**\n\n💡 *AI preserves 100% of facts, names, dates, and numbers while removing promotional clutter.*`,
       replyMarkup: {
         inline_keyboard: [
-          [{ text: '⚡ My Automations', callback_data: 'view_automations' }],
+          [{ text: '⚡ View My Bridges', callback_data: 'view_automations' }],
           [{ text: '« Main Menu', callback_data: 'main_menu' }],
         ],
       },
@@ -545,57 +676,51 @@ export class TelegramBotHandler {
   }
 
   private getHelpMenu(): TelegramMessageResponse {
-    const text = `ℹ️ **Setup Guide: Adding the Bot to Channels**\n\n**1. For X ➔ Telegram Channel:**\n1. Open your Telegram Channel settings.\n2. Tap **Administrators** ➔ **Add Admin**.\n3. Search for this bot's username and add it.\n4. Grant **"Post Messages"** permission.\n5. In this bot, create an automation with your channel username (e.g. \`@my_channel\`).\n\n**2. For Telegram ➔ X:**\n1. Add the bot to your Telegram Channel as Admin.\n2. When you publish a post in your channel, this bot will receive the post.\n3. Long posts are automatically rewritten or converted into threads fitting X 280-char limits.\n\n**3. Smart Ad Filtering:**\nOur built-in Gemini AI automatically detects token shills, affiliate codes, presales, and promo hashtags to keep your channels clean.`;
-
     return {
-      text,
+      text: `ℹ️ **Simple Setup Guide**\n\n**1. For X (Twitter) ➔ Telegram:**\n• Add this bot as an **Administrator** in your Telegram channel with *Post Messages* permission.\n• Send /new or tap **➕ Set Up Bridge**.\n• Select *X ➔ Telegram* and provide the X handle and your channel link.\n\n**2. For Telegram ➔ X (Twitter):**\n• Tap **🔗 Connect X Account** to authorize via official X OAuth 2.0.\n• Add the bot to your Telegram channel.\n• Posts in your channel will be published to X automatically!\n\n**Commands:**\n/start - Open main menu\n/new - Set up a new cross-posting bridge\n/automations - Manage active bridges\n/settings - Toggle AI rewrite & ad filter\n/otherbots - View recommended partner bots\n/help - Show this guide`,
       replyMarkup: {
         inline_keyboard: [
-          [{ text: '➕ Create Automation Now', callback_data: 'new_automation_start' }],
+          [{ text: '➕ Set Up Bridge Now', callback_data: 'new_automation_start' }],
           [{ text: '« Main Menu', callback_data: 'main_menu' }],
         ],
       },
     };
   }
 
-  /**
-   * Broadcast message to all users in database (Admin feature)
-   */
-  public async broadcast(messageText: string, buttonText?: string, buttonUrl?: string): Promise<{ sent: number; total: number }> {
+  public async broadcast(
+    text: string,
+    buttonText?: string,
+    buttonUrl?: string
+  ): Promise<{ sent: number; failed: number; total: number }> {
     const users = db.getUsers();
-    const settings = db.getSettings();
     let sent = 0;
+    let failed = 0;
 
-    for (const user of users) {
-      if (settings.botToken && !settings.botToken.includes('TODO')) {
-        try {
-          const body: Record<string, unknown> = {
-            chat_id: user.telegramId,
-            text: messageText,
+    const replyMarkup =
+      buttonText && buttonUrl
+        ? { inline_keyboard: [[{ text: buttonText, url: buttonUrl }]] }
+        : undefined;
+
+    for (const u of users) {
+      if (!u.telegramId) continue;
+      try {
+        if (telegramClient.hasValidToken()) {
+          await telegramClient.sendMessage(u.telegramId, text, {
             parse_mode: 'Markdown',
-          };
-          if (buttonText && buttonUrl) {
-            body.reply_markup = {
-              inline_keyboard: [[{ text: buttonText, url: buttonUrl }]],
-            };
-          }
-          await fetch(`https://api.telegram.org/bot${settings.botToken}/sendMessage`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(body),
+            reply_markup: replyMarkup,
           });
           sent++;
-        } catch {
-          // continue
+        } else {
+          sent++;
         }
-      } else {
-        // In simulation mode, count as sent
-        sent++;
+      } catch {
+        failed++;
       }
+      await new Promise((r) => setTimeout(r, 60));
     }
 
     db.logSystem('info', 'telegram_bot', `Broadcast completed: delivered to ${sent}/${users.length} users`);
-    return { sent, total: users.length };
+    return { sent, failed, total: users.length };
   }
 }
 

@@ -1,0 +1,109 @@
+{
+  "users": [
+    {
+      "id": "usr_7040484183",
+      "telegramId": "7040484183",
+      "telegramUsername": "@ayush2k",
+      "firstName": "AYUSH SRIVASTAV",
+      "authToken": "tga_7040484183_7b736796917d1819",
+      "plan": "free",
+      "postsProcessedCount": 0,
+      "postsFailedCount": 0,
+      "postsFilteredAdsCount": 0,
+      "status": "active",
+      "settings": {
+        "autoRewrite": true,
+        "adFilterEnabled": true,
+        "preserveFactsStrict": true,
+        "defaultPostFormat": "auto",
+        "xCredentials": {}
+      },
+      "createdAt": "2026-09-12T19:07:23.394Z",
+      "lastActiveAt": "2026-09-12T19:23:39.989Z"
+    }
+  ],
+  "automations": [],
+  "posts": [],
+  "otherBots": [],
+  "systemLogs": [
+    {
+      "id": "syslog_1789240370782_0bv",
+      "timestamp": "2026-09-12T19:12:50.782Z",
+      "level": "info",
+      "source": "telegram_bot",
+      "message": "Telegram Bot long-polling worker started."
+    },
+    {
+      "id": "syslog_1789240370459_jd2",
+      "timestamp": "2026-09-12T19:12:50.459Z",
+      "level": "info",
+      "source": "mongodb",
+      "message": "MONGODB_URI not configured. Operating in persistent file-backed mode (data/db.json)."
+    },
+    {
+      "id": "syslog_1789240202876_v71",
+      "timestamp": "2026-09-12T19:10:02.876Z",
+      "level": "info",
+      "source": "telegram_bot",
+      "message": "Telegram Bot long-polling worker started."
+    },
+    {
+      "id": "syslog_1789240202561_qti",
+      "timestamp": "2026-09-12T19:10:02.562Z",
+      "level": "info",
+      "source": "mongodb",
+      "message": "MONGODB_URI not configured. Operating in persistent file-backed mode (data/db.json)."
+    },
+    {
+      "id": "syslog_1789240182712_t4y",
+      "timestamp": "2026-09-12T19:09:42.712Z",
+      "level": "info",
+      "source": "telegram_bot",
+      "message": "Telegram Bot long-polling worker started."
+    },
+    {
+      "id": "syslog_1789240182367_hav",
+      "timestamp": "2026-09-12T19:09:42.367Z",
+      "level": "info",
+      "source": "mongodb",
+      "message": "MONGODB_URI not configured. Operating in persistent file-backed mode (data/db.json)."
+    },
+    {
+      "id": "syslog_1789240044291_6zo",
+      "timestamp": "2026-09-12T19:07:24.291Z",
+      "level": "warn",
+      "source": "telegram_bot",
+      "message": "Live delivery notice for chat 7040484183: Telegram API [400]: Bad Request: chat not found"
+    },
+    {
+      "id": "syslog_1789240043395_zt4",
+      "timestamp": "2026-09-12T19:07:23.395Z",
+      "level": "info",
+      "source": "telegram_bot",
+      "message": "New user registered via /start: @ayush2k (7040484183)",
+      "userId": "usr_7040484183"
+    },
+    {
+      "id": "syslog_1789240042075_jpu",
+      "timestamp": "2026-09-12T19:07:22.075Z",
+      "level": "info",
+      "source": "telegram_bot",
+      "message": "Telegram Bot long-polling worker started."
+    },
+    {
+      "id": "syslog_1789240041689_auv",
+      "timestamp": "2026-09-12T19:07:21.689Z",
+      "level": "info",
+      "source": "mongodb",
+      "message": "MONGODB_URI not configured. Operating in persistent file-backed mode (data/db.json)."
+    }
+  ],
+  "settings": {
+    "botToken": "",
+    "botUsername": "X2TelegramBot",
+    "webhookUrl": "http://localhost:3000/api/telegram/webhook",
+    "isWebhookActive": false,
+    "adminSecret": "",
+    "autoProcessSampleQueue": true
+  }
+}

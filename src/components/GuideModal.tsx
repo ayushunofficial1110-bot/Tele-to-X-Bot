@@ -75,7 +75,41 @@ export const GuideModal: React.FC<GuideModalProps> = ({ isOpen, onClose }) => {
             </p>
           </div>
 
-          {/* Step 4 */}
+          {/* Step 4: Render Deployment */}
+          <div className="p-4 rounded-2xl bg-slate-950 border border-slate-800 space-y-3">
+            <div className="flex items-center space-x-2 text-violet-400 font-bold">
+              <Server className="w-4 h-4" />
+              <span>Deploy to Render.com (Web Service)</span>
+            </div>
+            <p className="text-slate-300">
+              In Render, create a <strong>Web Service</strong> linked to your repo and set:
+            </p>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-[11px] font-mono">
+              <div className="p-2 bg-slate-900 rounded-lg border border-slate-800">
+                <span className="text-slate-400 block text-[10px]">BUILD COMMAND</span>
+                <code className="text-emerald-400">npm install && npm run build</code>
+              </div>
+              <div className="p-2 bg-slate-900 rounded-lg border border-slate-800">
+                <span className="text-slate-400 block text-[10px]">START COMMAND</span>
+                <code className="text-sky-400">npm start</code>
+              </div>
+            </div>
+            <div className="p-2.5 bg-slate-900/60 rounded-xl border border-slate-800 text-[11px] space-y-1">
+              <span className="text-slate-400 font-semibold block text-[10px]">RENDER ENVIRONMENT VARIABLES:</span>
+              <div className="grid grid-cols-1 gap-1 text-slate-300">
+                <div><code className="text-sky-300">NODE_ENV</code> = <code className="text-slate-200">production</code></div>
+                <div><code className="text-sky-300">APP_URL</code> = <code className="text-slate-200">https://your-service.onrender.com</code></div>
+                <div><code className="text-sky-300">TELEGRAM_BOT_TOKEN</code> = <code className="text-slate-200">Bot token from @BotFather</code></div>
+                <div><code className="text-sky-300">GEMINI_API_KEY</code> = <code className="text-slate-200">Google Gemini API Key</code></div>
+                <div><code className="text-sky-300">ADMIN_KEY</code> = <code className="text-slate-200">Your secret password for /admin</code></div>
+                <div><code className="text-sky-300">MONGODB_URI</code> = <code className="text-slate-200">MongoDB Atlas URI (free tier)</code></div>
+                <div><code className="text-sky-300">TWITTER_CLIENT_ID</code> = <code className="text-slate-200">Twitter Developer App Client ID</code></div>
+                <div><code className="text-sky-300">TWITTER_CLIENT_SECRET</code> = <code className="text-slate-200">Twitter Developer App Secret</code></div>
+              </div>
+            </div>
+          </div>
+
+          {/* Step 5 */}
           <div className="p-4 rounded-2xl bg-slate-950 border border-slate-800 space-y-2">
             <div className="flex items-center space-x-2 text-emerald-400 font-bold">
               <ShieldCheck className="w-4 h-4" />

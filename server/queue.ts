@@ -1,5 +1,7 @@
 import { db } from './db.ts';
 import { detectAdOrPromotion, rewriteSocialPost, AdDetectionResult } from './gemini.ts';
+import { telegramClient } from './telegramClient.ts';
+import { xClient } from './xClient.ts';
 import { Automation, PostLog, MediaItem } from '../src/types.ts';
 
 export interface QueueJob {
@@ -50,6 +52,11 @@ class AutomationQueue {
       return { status: 'duplicate', reason: 'Post was already published previously' };
     }
 
+    if (db.isContentDuplicate(automation.id, postData.sourceContent)) {
+      db.logSystem('warn', 'queue', `Deduplication dropped duplicate content`, automation.userId);
+      return { status: 'duplicate', reason: 'Duplicate content already published previously' };
+    }
+
     // Check if currently queued
     const alreadyQueued = this.queue.some(
       (j) => j.automationId === automation.id && j.sourcePostId === postData.sourcePostId && j.status === 'pending'
@@ -74,7 +81,12 @@ class AutomationQueue {
     };
 
     this.queue.push(job);
-    db.logSystem('info', 'queue', `Enqueued post from ${postData.sourceAuthor} for automation ${automation.name}`, automation.userId);
+    db.logSystem(
+      'info',
+      'queue',
+      `Enqueued post from ${postData.sourceAuthor} for automation ${automation.name}`,
+      automation.userId
+    );
     return { status: 'queued', jobId: job.id };
   }
 
@@ -236,8 +248,13 @@ class AutomationQueue {
       processedContent += `\n\n🔗 Source: ${job.sourceUrl}`;
     }
 
-    // 3. Dispatch to destination platform
-    await this.dispatchToDestination(automation, processedContent, job.media || [], threadParts);
+    // 3. Dispatch to destination platform with real API calls
+    const publishedPostId = await this.dispatchToDestination(
+      automation,
+      processedContent,
+      job.media || [],
+      threadParts
+    );
 
     // 4. Record successful publication
     const publishedLog: PostLog = {
@@ -257,6 +274,7 @@ class AutomationQueue {
       adReasoning: adResult.reason,
       adCategory: adResult.category,
       status: 'published',
+      publishedPostId,
       attempts: job.attempts,
       maxAttempts: job.maxAttempts,
       publishedAt: new Date().toISOString(),
@@ -277,44 +295,113 @@ class AutomationQueue {
     content: string,
     media: MediaItem[],
     threadParts?: string[]
-  ): Promise<void> {
-    const settings = db.getSettings();
-
+  ): Promise<string> {
     if (automation.direction === 'x_to_telegram') {
-      // If real Telegram Bot token is active, post to actual Telegram API
-      if (settings.botToken && !settings.botToken.includes('TODO')) {
-        try {
-          const targetChannel = automation.destination;
-          const url = `https://api.telegram.org/bot${settings.botToken}/sendMessage`;
-          const res = await fetch(url, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              chat_id: targetChannel,
-              text: content,
-              parse_mode: 'Markdown',
-              disable_web_page_preview: false,
-            }),
-          });
-          const json = await res.json();
-          if (!json.ok) {
-            throw new Error(`Telegram API Error: ${json.description || 'Unknown error'}`);
-          }
-        } catch (err: unknown) {
-          const msg = err instanceof Error ? err.message : String(err);
-          // If Telegram API fails, log warning and let simulation / preview proceed
-          db.logSystem('warn', 'telegram_bot', `Telegram API dispatch note: ${msg}`);
+      return await this.dispatchToTelegram(automation, content, media);
+    } else {
+      return await this.dispatchToX(automation, content, media, threadParts);
+    }
+  }
+
+  private async dispatchToTelegram(
+    automation: Automation,
+    content: string,
+    media: MediaItem[]
+  ): Promise<string> {
+    const targetChannel = automation.destination;
+    let publishedId = `tg_${Date.now()}`;
+
+    // If real bot token is available, deliver to Telegram API
+    if (telegramClient.hasValidToken()) {
+      try {
+        const CAPTION_LIMIT = 1024;
+        let caption = content;
+        let followUpText: string | null = null;
+
+        if (media.length > 0 && content.length > CAPTION_LIMIT) {
+          // Break caption safely at word boundary
+          const lastSpace = content.lastIndexOf(' ', CAPTION_LIMIT - 10);
+          const splitIdx = lastSpace > 500 ? lastSpace : CAPTION_LIMIT - 10;
+          caption = content.substring(0, splitIdx).trim();
+          followUpText = content.substring(splitIdx).trim();
         }
+
+        if (media.length === 1) {
+          const m = media[0];
+          if (m.type === 'video') {
+            const res = await telegramClient.sendVideo(targetChannel, m.url, caption);
+            publishedId = String(res?.message_id || publishedId);
+          } else {
+            const res = await telegramClient.sendPhoto(targetChannel, m.url, caption);
+            publishedId = String(res?.message_id || publishedId);
+          }
+        } else if (media.length > 1) {
+          const mediaList = media.map((m, idx) => ({
+            type: (m.type === 'video' ? 'video' : 'photo') as 'photo' | 'video',
+            media: m.url,
+            caption: idx === 0 ? caption : undefined,
+          }));
+          const res = await telegramClient.sendMediaGroup(targetChannel, mediaList);
+          publishedId = String(Array.isArray(res) ? res[0]?.message_id : res?.message_id || publishedId);
+        } else {
+          const res = await telegramClient.sendMessage(targetChannel, content, {
+            disable_web_page_preview: false,
+          });
+          publishedId = String(res?.message_id || publishedId);
+        }
+
+        // If caption had overflow, send remainder as clean follow-up text
+        if (followUpText && media.length > 0) {
+          await telegramClient.sendMessage(targetChannel, followUpText, {
+            disable_web_page_preview: false,
+          });
+        }
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        db.logSystem('warn', 'telegram_bot', `Telegram delivery note to ${targetChannel}: ${msg}`);
+        throw err;
       }
     } else {
-      // Telegram ➔ X
-      // In production X API integration, uses user's isolated X credentials:
-      const user = db.getUser(automation.userId);
-      const xCreds = user?.settings.xCredentials;
-      if (xCreds?.bearerToken || xCreds?.accessToken) {
-        db.logSystem('info', 'api', `Posting ${threadParts?.length ? `${threadParts.length}-tweet thread` : 'tweet'} to X (@${automation.destination}) using user auth`);
-      }
+      db.logSystem('info', 'telegram_bot', `Telegram bot token not yet configured; post stored for ${targetChannel}`);
     }
+
+    return publishedId;
+  }
+
+  private async dispatchToX(
+    automation: Automation,
+    content: string,
+    media: MediaItem[],
+    threadParts?: string[]
+  ): Promise<string> {
+    const user = db.getUser(automation.userId) || db.getOwner();
+    const creds = user?.settings.xCredentials || {};
+    let publishedId = `x_${Date.now()}`;
+
+    // If user has provided X credentials, post to real Twitter API
+    if (creds.oauth2AccessToken || (creds.apiKey && creds.accessToken) || creds.bearerToken) {
+      try {
+        if (threadParts && threadParts.length > 1) {
+          const tweetIds = await xClient.postThread(creds, threadParts);
+          publishedId = tweetIds.join(',');
+        } else {
+          const tweet = await xClient.postTweet(creds, content);
+          publishedId = tweet.id;
+        }
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        db.logSystem('warn', 'x_client', `X API posting note for ${automation.destination}: ${msg}`);
+        throw err;
+      }
+    } else {
+      db.logSystem(
+        'info',
+        'x_client',
+        `No Twitter OAuth configured for personal bot; post logged for destination ${automation.destination}.`
+      );
+    }
+
+    return publishedId;
   }
 }
 

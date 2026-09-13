@@ -17,8 +17,9 @@ import {
   FileText,
   Sliders,
   Check,
+  Bot,
 } from 'lucide-react';
-import { BotUser, Automation, PostLog, UserSettings } from '../types.ts';
+import { BotUser, Automation, PostLog, UserSettings, OtherBot } from '../types.ts';
 
 interface UserDashboardProps {
   currentUser: BotUser;
@@ -48,11 +49,148 @@ export const UserDashboard: React.FC<UserDashboardProps> = ({
 
   // Settings Form State
   const [settingsForm, setSettingsForm] = useState<UserSettings>(currentUser.settings);
+  const [syncingAutoId, setSyncingAutoId] = useState<string | null>(null);
+  const [syncNotice, setSyncNotice] = useState<{ id: string; text: string } | null>(null);
+  const [channelVerifyState, setChannelVerifyState] = useState<{
+    status: 'idle' | 'checking' | 'success' | 'error';
+    message?: string;
+    title?: string;
+  }>({ status: 'idle' });
+  const [isXOAuthConnecting, setIsXOAuthConnecting] = useState(false);
+  const [otherBots, setOtherBots] = useState<OtherBot[]>([]);
 
   useEffect(() => {
     fetchLogs();
+    fetchOtherBots();
     setSettingsForm(currentUser.settings);
-  }, [currentUser.id]);
+  }, [currentUser.id, currentUser.settings]);
+
+  const fetchOtherBots = async () => {
+    try {
+      const res = await fetch('/api/other-bots');
+      const data = await res.json();
+      if (data.ok && Array.isArray(data.bots)) {
+        setOtherBots(data.bots);
+      }
+    } catch (err) {
+      console.error('Failed to load other bots:', err);
+    }
+  };
+
+  const handleRecordBotClick = (botId: string) => {
+    fetch(`/api/other-bots/${botId}/click`, { method: 'POST' }).catch(() => {});
+  };
+
+  useEffect(() => {
+    const handleOAuthMessage = (event: MessageEvent) => {
+      if (event.data?.type === 'X_OAUTH_SUCCESS') {
+        onRefresh();
+        setShowSettingsModal(false);
+      }
+    };
+    window.addEventListener('message', handleOAuthMessage);
+    return () => window.removeEventListener('message', handleOAuthMessage);
+  }, [onRefresh]);
+
+  const handleSyncNow = async (auto: Automation) => {
+    setSyncingAutoId(auto.id);
+    setSyncNotice(null);
+    try {
+      const res = await fetch(`/api/user/automations/${auto.id}/sync`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ userId: currentUser.id }),
+      });
+      const data = await res.json();
+      setSyncNotice({ id: auto.id, text: data.message || 'Sync completed.' });
+      onRefresh();
+      fetchLogs();
+      setTimeout(() => setSyncNotice(null), 4000);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setSyncNotice({ id: auto.id, text: `Sync failed: ${msg}` });
+    } finally {
+      setSyncingAutoId(null);
+    }
+  };
+
+  const handleConnectXOAuth = async () => {
+    setIsXOAuthConnecting(true);
+    try {
+      const res = await fetch(`/api/auth/x/login?userId=${currentUser.id}`);
+      const data = await res.json();
+      if (data.ok && data.url) {
+        // Open OAuth in popup or current window
+        const width = 600;
+        const height = 700;
+        const left = window.screen.width / 2 - width / 2;
+        const top = window.screen.height / 2 - height / 2;
+        window.open(
+          data.url,
+          'X_OAuth_Login',
+          `width=${width},height=${height},top=${top},left=${left},toolbar=no,location=no,status=no,menubar=no`
+        );
+      }
+    } catch (err) {
+      console.error('Failed to initiate X OAuth:', err);
+    } finally {
+      setIsXOAuthConnecting(false);
+    }
+  };
+
+  const handleDisconnectXOAuth = async () => {
+    if (!confirm('Disconnect X (Twitter) authentication?')) return;
+    try {
+      await fetch('/api/auth/x/disconnect', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ userId: currentUser.id }),
+      });
+      onRefresh();
+    } catch (err) {
+      console.error('Failed to disconnect X:', err);
+    }
+  };
+
+  const handleVerifyChannel = async () => {
+    const channelId = settingsForm.telegramChannelId?.trim();
+    if (!channelId) {
+      setChannelVerifyState({
+        status: 'error',
+        message: 'Please enter a Telegram channel username or ID first.',
+      });
+      return;
+    }
+
+    setChannelVerifyState({ status: 'checking', message: 'Checking bot admin rights in channel...' });
+
+    try {
+      const res = await fetch('/api/telegram/verify-channel', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ channelId }),
+      });
+      const data = await res.json();
+
+      if (data.ok && data.canPost) {
+        setChannelVerifyState({
+          status: 'success',
+          title: data.chatTitle,
+          message: `Verified! Bot is an administrator in "${data.chatTitle}" with permission to post messages.`,
+        });
+      } else {
+        setChannelVerifyState({
+          status: 'error',
+          message:
+            data.error ||
+            `Bot is not an administrator in "${channelId}". Please add the bot as an admin with "Post Messages" enabled.`,
+        });
+      }
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setChannelVerifyState({ status: 'error', message: `Verification check failed: ${msg}` });
+    }
+  };
 
   const fetchLogs = async () => {
     try {
@@ -353,7 +491,7 @@ export const UserDashboard: React.FC<UserDashboardProps> = ({
                   </div>
                 </div>
 
-                {/* Features & Stats */}
+                {/* Features & Actions */}
                 <div className="flex items-center justify-between text-[11px] pt-1 text-slate-400">
                   <div className="flex items-center space-x-3">
                     <span className="flex items-center space-x-1 text-emerald-400">
@@ -366,20 +504,38 @@ export const UserDashboard: React.FC<UserDashboardProps> = ({
                     </span>
                   </div>
 
-                  <button
-                    onClick={() => handleTestAuto(auto)}
-                    className="flex items-center space-x-1 px-2.5 py-1 rounded bg-sky-600/10 hover:bg-sky-600/20 text-sky-300 border border-sky-500/20 font-medium transition"
-                  >
-                    <Play className="w-2.5 h-2.5" />
-                    <span>Test Run</span>
-                  </button>
+                  <div className="flex items-center space-x-2">
+                    <button
+                      onClick={() => handleSyncNow(auto)}
+                      disabled={syncingAutoId === auto.id}
+                      className="flex items-center space-x-1 px-2.5 py-1 rounded bg-slate-800 hover:bg-slate-700 text-sky-400 border border-slate-700 font-medium transition disabled:opacity-50"
+                      title="Immediately query source account for newly published tweets"
+                    >
+                      <RefreshCw className={`w-2.5 h-2.5 ${syncingAutoId === auto.id ? 'animate-spin' : ''}`} />
+                      <span>{syncingAutoId === auto.id ? 'Checking...' : 'Sync Now'}</span>
+                    </button>
+                    <button
+                      onClick={() => handleTestAuto(auto)}
+                      className="flex items-center space-x-1 px-2.5 py-1 rounded bg-sky-600/10 hover:bg-sky-600/20 text-sky-300 border border-sky-500/20 font-medium transition"
+                      title="Send sample test post through AI pipeline and queue"
+                    >
+                      <Play className="w-2.5 h-2.5" />
+                      <span>Test Run</span>
+                    </button>
+                  </div>
                 </div>
+
+                {syncNotice && syncNotice.id === auto.id && (
+                  <div className="p-2 rounded-lg bg-sky-950/60 border border-sky-800/80 text-[11px] text-sky-200">
+                    {syncNotice.text}
+                  </div>
+                )}
 
                 <div className="flex justify-between items-center text-[10px] text-slate-500 pt-2 border-t border-slate-800/80">
                   <span>Processed: <strong className="text-slate-300">{auto.stats.processedCount}</strong></span>
                   <span>Ads Skipped: <strong className="text-slate-300">{auto.stats.skippedAdsCount}</strong></span>
                   <span>
-                    Last run: {auto.stats.lastRunAt ? new Date(auto.stats.lastRunAt).toLocaleTimeString() : 'Never'}
+                    Last checked: {auto.lastPollAt ? new Date(auto.lastPollAt).toLocaleTimeString() : 'Active Poll Loop'}
                   </span>
                 </div>
               </div>
@@ -542,6 +698,62 @@ export const UserDashboard: React.FC<UserDashboardProps> = ({
         )}
       </div>
 
+      {/* Featured Partner Bots Directory (Only Active Bots Configured by Admin) */}
+      {otherBots.length > 0 && (
+        <div className="space-y-4 pt-4 border-t border-slate-800/80">
+          <div className="flex items-center space-x-2">
+            <Bot className="w-5 h-5 text-indigo-400" />
+            <h3 className="text-lg font-bold text-white">Recommended Telegram Bots</h3>
+            <span className="text-xs text-slate-500">• Verified Directory</span>
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+            {otherBots.map((bot) => (
+              <div
+                key={bot.id}
+                className="bg-slate-900 border border-slate-800 hover:border-slate-700/80 rounded-2xl p-5 shadow-lg flex flex-col justify-between transition"
+              >
+                <div>
+                  <div className="flex items-start justify-between mb-2">
+                    <div className="flex items-center space-x-2.5">
+                      <span className="text-2xl">{bot.icon || '🤖'}</span>
+                      <div>
+                        <h4 className="text-sm font-bold text-white leading-snug">{bot.name}</h4>
+                        <span className="text-[11px] text-sky-400 font-mono">{bot.username}</span>
+                      </div>
+                    </div>
+                    {bot.badge && (
+                      <span className="text-[10px] uppercase font-bold px-2 py-0.5 rounded bg-indigo-500/20 text-indigo-300 border border-indigo-500/30">
+                        {bot.badge}
+                      </span>
+                    )}
+                  </div>
+                  <p className="text-xs text-slate-400 leading-relaxed mb-4">
+                    {bot.description || 'Recommended automated Telegram bot tool.'}
+                  </p>
+                </div>
+
+                <div className="flex items-center justify-between pt-3 border-t border-slate-800/80">
+                  <span className="text-[10px] uppercase font-semibold text-slate-500">
+                    {bot.category}
+                  </span>
+                  <a
+                    href={bot.url}
+                    target="_blank"
+                    rel="noreferrer"
+                    onClick={() => handleRecordBotClick(bot.id)}
+                    className="inline-flex items-center space-x-1.5 px-3 py-1.5 rounded-xl bg-sky-600 hover:bg-sky-500 text-white text-xs font-semibold shadow-sm transition"
+                  >
+                    <span>Launch Bot</span>
+                    <ExternalLink className="w-3 h-3" />
+                  </a>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       {/* Modal: Create Automation */}
       {showCreateModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4">
@@ -616,7 +828,7 @@ export const UserDashboard: React.FC<UserDashboardProps> = ({
                 </label>
                 <input
                   type="text"
-                  placeholder={formDirection === 'x_to_telegram' ? '@tech_pulse_daily' : '@my_x_handle'}
+                  placeholder={formDirection === 'x_to_telegram' ? '@my_channel or https://t.me/my_channel' : '@my_x_handle'}
                   value={formDestination}
                   onChange={(e) => setFormDestination(e.target.value)}
                   className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-sky-500 font-mono"
@@ -703,14 +915,14 @@ export const UserDashboard: React.FC<UserDashboardProps> = ({
         </div>
       )}
 
-      {/* Modal: User Settings & Isolated Credentials */}
+      {/* Modal: User Settings & Account Configuration */}
       {showSettingsModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4">
           <div className="bg-slate-900 border border-slate-800 rounded-3xl max-w-md w-full p-6 shadow-2xl">
             <div className="flex items-center justify-between pb-4 border-b border-slate-800">
               <div className="flex items-center space-x-2 text-sky-400">
-                <Key className="w-5 h-5" />
-                <h3 className="text-lg font-bold text-white">Isolated Tenant Credentials</h3>
+                <Sliders className="w-5 h-5" />
+                <h3 className="text-lg font-bold text-white">Account & Channel Configuration</h3>
               </div>
               <button
                 onClick={() => setShowSettingsModal(false)}
@@ -721,13 +933,57 @@ export const UserDashboard: React.FC<UserDashboardProps> = ({
             </div>
 
             <form onSubmit={handleSaveSettings} className="space-y-4 pt-4">
-              <p className="text-xs text-slate-400 leading-relaxed">
-                Credentials entered here are isolated strictly to your account (<code className="text-sky-300 font-mono">{currentUser.id}</code>).
-              </p>
+              <div className="p-3 bg-slate-950/80 border border-slate-800/80 rounded-xl text-xs text-slate-400 leading-relaxed">
+                <span className="font-semibold text-slate-300 block mb-1">🔒 Server-Managed Infrastructure</span>
+                All server secrets (MongoDB, Telegram Bot Token, Twitter App credentials, and Admin Key) are managed strictly on the server. You only configure your personal channels and authorization.
+              </div>
+
+              {/* X OAuth 2.0 PKCE Integration */}
+              <div className="pt-1">
+                <label className="block text-xs font-semibold text-slate-300 mb-1.5">
+                  X (Twitter) Authorization
+                </label>
+                {currentUser.settings.xCredentials?.oauth2AccessToken ? (
+                  <div className="p-3 bg-emerald-950/40 border border-emerald-800/80 rounded-xl flex items-center justify-between">
+                    <div className="flex items-center space-x-2 text-xs text-emerald-300">
+                      <ShieldCheck className="w-4 h-4 text-emerald-400 flex-shrink-0" />
+                      <div>
+                        <span className="font-bold block">Connected via OAuth 2.0</span>
+                        <span className="text-[10px] text-emerald-400/80">
+                          {currentUser.settings.xCredentials?.accountHandle || 'Authorized for direct publishing'}
+                        </span>
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={handleDisconnectXOAuth}
+                      className="px-2.5 py-1 text-[11px] rounded bg-rose-950/50 hover:bg-rose-900/60 text-rose-300 border border-rose-800/50 font-medium transition"
+                    >
+                      Disconnect
+                    </button>
+                  </div>
+                ) : (
+                  <div className="p-3 bg-slate-950/80 border border-slate-800 rounded-xl flex items-center justify-between">
+                    <div>
+                      <span className="text-xs font-bold text-white block">Official X OAuth 2.0</span>
+                      <span className="text-[10px] text-slate-400">1-click authorization without sharing passwords</span>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={handleConnectXOAuth}
+                      disabled={isXOAuthConnecting}
+                      className="px-3 py-1.5 rounded-lg bg-sky-600 hover:bg-sky-500 text-white text-xs font-bold transition flex items-center space-x-1.5 shadow-md shadow-sky-600/20"
+                    >
+                      <Key className="w-3.5 h-3.5" />
+                      <span>{isXOAuthConnecting ? 'Opening...' : 'Connect X'}</span>
+                    </button>
+                  </div>
+                )}
+              </div>
 
               <div>
                 <label className="block text-xs font-semibold text-slate-300 mb-1">
-                  Connected X (Twitter) Handle
+                  Your Connected X (Twitter) Handle
                 </label>
                 <input
                   type="text"
@@ -744,39 +1000,72 @@ export const UserDashboard: React.FC<UserDashboardProps> = ({
               </div>
 
               <div>
-                <label className="block text-xs font-semibold text-slate-300 mb-1">
-                  X API Bearer Token (Optional / User-Owned)
-                </label>
-                <input
-                  type="password"
-                  placeholder="AAAAAAAAAAAAAAAAAAAAA..."
-                  value={settingsForm.xCredentials.bearerToken || ''}
-                  onChange={(e) =>
-                    setSettingsForm({
-                      ...settingsForm,
-                      xCredentials: { ...settingsForm.xCredentials, bearerToken: e.target.value },
-                    })
-                  }
-                  className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-sky-500 font-mono"
-                />
-                <span className="text-[10px] text-slate-500 block mt-1">
-                  Required only if posting to your own private X account or reading private lists.
-                </span>
-              </div>
-
-              <div>
-                <label className="block text-xs font-semibold text-slate-300 mb-1">
-                  Telegram Destination Channel ID
-                </label>
+                <div className="flex items-center justify-between mb-1">
+                  <label className="text-xs font-semibold text-slate-300">
+                    Default Telegram Destination Channel
+                  </label>
+                  <button
+                    type="button"
+                    onClick={handleVerifyChannel}
+                    disabled={channelVerifyState.status === 'checking'}
+                    className="text-[11px] text-sky-400 hover:text-sky-300 font-medium underline"
+                  >
+                    {channelVerifyState.status === 'checking' ? 'Verifying...' : 'Verify Bot Rights'}
+                  </button>
+                </div>
                 <input
                   type="text"
-                  placeholder="@my_channel_username or -10012345678"
+                  placeholder="@my_channel or https://t.me/my_channel"
                   value={settingsForm.telegramChannelId || ''}
                   onChange={(e) =>
                     setSettingsForm({ ...settingsForm, telegramChannelId: e.target.value })
                   }
                   className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-sky-500 font-mono"
                 />
+                {channelVerifyState.status === 'success' && (
+                  <div className="mt-1.5 p-2 rounded-lg bg-emerald-950/50 border border-emerald-800/80 text-[11px] text-emerald-300 flex items-start space-x-1.5">
+                    <ShieldCheck className="w-3.5 h-3.5 text-emerald-400 mt-0.5 flex-shrink-0" />
+                    <span>{channelVerifyState.message}</span>
+                  </div>
+                )}
+                {channelVerifyState.status === 'error' && (
+                  <div className="mt-1.5 p-2 rounded-lg bg-rose-950/50 border border-rose-800/80 text-[11px] text-rose-300 flex items-start space-x-1.5">
+                    <ShieldAlert className="w-3.5 h-3.5 text-rose-400 mt-0.5 flex-shrink-0" />
+                    <span>{channelVerifyState.message}</span>
+                  </div>
+                )}
+                <span className="text-[10px] text-slate-500 block mt-1">
+                  Ensure this bot is added as an administrator to your channel with "Post Messages" permission.
+                </span>
+              </div>
+
+              {/* Preferences */}
+              <div className="space-y-2 pt-2 border-t border-slate-800/80">
+                <label className="block text-xs font-semibold text-slate-300">
+                  Processing Preferences
+                </label>
+                <label className="flex items-center justify-between text-xs text-slate-300 cursor-pointer">
+                  <span>AI Fact-Preserving Rewriting</span>
+                  <input
+                    type="checkbox"
+                    checked={settingsForm.autoRewrite}
+                    onChange={(e) =>
+                      setSettingsForm({ ...settingsForm, autoRewrite: e.target.checked })
+                    }
+                    className="w-4 h-4 rounded text-sky-600 focus:ring-0 bg-slate-950 border-slate-800"
+                  />
+                </label>
+                <label className="flex items-center justify-between text-xs text-slate-300 cursor-pointer">
+                  <span>Smart Spam & Ad Filter</span>
+                  <input
+                    type="checkbox"
+                    checked={settingsForm.adFilterEnabled}
+                    onChange={(e) =>
+                      setSettingsForm({ ...settingsForm, adFilterEnabled: e.target.checked })
+                    }
+                    className="w-4 h-4 rounded text-sky-600 focus:ring-0 bg-slate-950 border-slate-800"
+                  />
+                </label>
               </div>
 
               <div className="flex justify-end space-x-3 pt-3 border-t border-slate-800">
@@ -791,7 +1080,7 @@ export const UserDashboard: React.FC<UserDashboardProps> = ({
                   type="submit"
                   className="px-5 py-2 rounded-xl bg-sky-600 hover:bg-sky-500 text-white text-xs font-bold shadow-lg shadow-sky-600/20"
                 >
-                  Save Credentials
+                  Save Settings
                 </button>
               </div>
             </form>

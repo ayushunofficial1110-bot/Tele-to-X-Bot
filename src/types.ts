@@ -9,6 +9,10 @@ export interface UserXCredentials {
   accessToken?: string;
   accessSecret?: string;
   accountHandle?: string;
+  oauth2AccessToken?: string;
+  oauth2RefreshToken?: string;
+  oauth2ExpiresAt?: number;
+  oauth2Scope?: string;
 }
 
 export interface UserSettings {
@@ -18,21 +22,15 @@ export interface UserSettings {
   defaultPostFormat: 'auto' | 'concise' | 'thread';
   xCredentials: UserXCredentials;
   telegramChannelId?: string;
-}
-
-export interface UserPlan {
-  name: PlanType;
-  monthlyLimit: number;
-  checkIntervalMinutes: number;
-  threadPostingSupported: boolean;
-  priorityQueue: boolean;
+  telegramChannelTitle?: string;
 }
 
 export interface BotUser {
-  id: string; // e.g. "user_1001" or "tg_12345678"
-  telegramId: string;
-  telegramUsername: string;
+  id: string; // Unique user ID (e.g. "usr_12345678")
+  telegramId: string; // Telegram user ID (numeric string)
+  telegramUsername: string; // e.g. "@username"
   firstName: string;
+  authToken: string; // Secret login token for web dashboard access
   plan: PlanType;
   postsProcessedCount: number;
   postsFailedCount: number;
@@ -66,12 +64,13 @@ export interface Automation {
   userId: string;
   name: string;
   direction: AutomationDirection;
-  source: string; // e.g. "@techradar" or "Telegram Channel: @my_news"
-  destination: string; // e.g. "Telegram Channel: @tech_feed" or "@x_company_account"
+  source: string; // e.g. "@OpenAI" or "@my_telegram_channel"
+  destination: string; // e.g. "@my_telegram_channel" or "@my_x_handle"
   status: 'active' | 'paused' | 'error';
   settings: AutomationSettings;
   stats: AutomationStats;
   lastSeenPostId?: string;
+  lastPollAt?: string;
   lastError?: string;
   createdAt: string;
   updatedAt: string;
@@ -91,6 +90,7 @@ export interface PostLog {
   sourcePostId: string;
   sourceAuthor: string;
   sourceContent: string;
+  contentHash?: string; // Normalized SHA-256 for strict content deduplication
   sourceUrl?: string;
   media: MediaItem[];
   processedContent: string;
@@ -103,6 +103,7 @@ export interface PostLog {
   attempts: number;
   maxAttempts: number;
   errorMessage?: string;
+  publishedPostId?: string;
   publishedAt?: string;
   createdAt: string;
 }
@@ -110,9 +111,9 @@ export interface PostLog {
 export interface OtherBot {
   id: string;
   name: string;
-  username: string; // e.g. "@CryptoAlertsHQBot"
+  username: string; // e.g. "@CryptoWhaleTrackerBot"
   description: string;
-  category: string; // e.g. "Crypto", "AI Tools", "Marketing", "News"
+  category: string; // e.g. "News", "Crypto", "Productivity"
   url: string;
   icon: string;
   badge?: string;
@@ -120,13 +121,14 @@ export interface OtherBot {
   clicksCount: number;
   order: number;
   createdAt: string;
+  updatedAt?: string;
 }
 
 export interface SystemLog {
   id: string;
   timestamp: string;
   level: 'info' | 'warn' | 'error' | 'success';
-  source: 'engine' | 'telegram_bot' | 'gemini' | 'ad_detector' | 'queue' | 'api';
+  source: 'engine' | 'telegram_bot' | 'gemini' | 'ad_detector' | 'queue' | 'api' | 'monitor' | 'x_client' | 'mongodb';
   message: string;
   userId?: string;
   metadata?: Record<string, unknown>;
@@ -136,6 +138,7 @@ export interface SystemStats {
   totalUsers: number;
   activeUsers: number;
   newUsers24h: number;
+  newUsers7d: number;
   activeAutomations: number;
   totalAutomations: number;
   postsProcessed: number;

@@ -1,0 +1,26 @@
+services:
+  - type: web
+    name: x2telegram-bot
+    runtime: node
+    plan: free
+    buildCommand: npm install && npm run build
+    startCommand: npm start
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: APP_URL
+        generateValue: false
+      - key: TELEGRAM_BOT_TOKEN
+        generateValue: false
+      - key: GEMINI_API_KEY
+        generateValue: false
+      - key: ADMIN_KEY
+        generateValue: false
+      - key: MONGODB_URI
+        generateValue: false
+      - key: TWITTER_CLIENT_ID
+        generateValue: false
+      - key: TWITTER_CLIENT_SECRET
+        generateValue: false
+      - key: TWITTER_BEARER_TOKEN
+        generateValue: false
