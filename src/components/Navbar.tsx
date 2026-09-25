@@ -12,8 +12,8 @@ import {
 import { BotUser } from '../types.ts';
 
 interface NavbarProps {
-  activeTab: 'simulator' | 'dashboard' | 'pipeline' | 'admin';
-  setActiveTab: (tab: 'simulator' | 'dashboard' | 'pipeline' | 'admin') => void;
+  activeTab: 'dashboard' | 'admin';
+  setActiveTab: (tab: 'dashboard' | 'admin') => void;
   currentUser: BotUser | null;
   onLogout: () => void;
   onOpenGuide: () => void;
@@ -61,32 +61,6 @@ export const Navbar: React.FC<NavbarProps> = ({
             >
               <Sliders className="w-3.5 h-3.5" />
               <span>My Automations</span>
-            </button>
-
-            <button
-              id="nav-tab-simulator"
-              onClick={() => setActiveTab('simulator')}
-              className={`flex items-center space-x-2 px-3.5 py-1.5 rounded-lg text-xs font-medium transition-all ${
-                activeTab === 'simulator'
-                  ? 'bg-sky-600 text-white shadow-sm'
-                  : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/60'
-              }`}
-            >
-              <Send className="w-3.5 h-3.5" />
-              <span>Telegram Bot Chat</span>
-            </button>
-
-            <button
-              id="nav-tab-pipeline"
-              onClick={() => setActiveTab('pipeline')}
-              className={`flex items-center space-x-2 px-3.5 py-1.5 rounded-lg text-xs font-medium transition-all ${
-                activeTab === 'pipeline'
-                  ? 'bg-sky-600 text-white shadow-sm'
-                  : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/60'
-              }`}
-            >
-              <Cpu className="w-3.5 h-3.5" />
-              <span>AI Pipeline Lab</span>
             </button>
 
             <button
@@ -155,22 +129,6 @@ export const Navbar: React.FC<NavbarProps> = ({
             }`}
           >
             My Automations
-          </button>
-          <button
-            onClick={() => setActiveTab('simulator')}
-            className={`px-3 py-1.5 rounded-lg whitespace-nowrap ${
-              activeTab === 'simulator' ? 'bg-sky-600 text-white' : 'text-slate-400 bg-slate-800/40'
-            }`}
-          >
-            Telegram Bot
-          </button>
-          <button
-            onClick={() => setActiveTab('pipeline')}
-            className={`px-3 py-1.5 rounded-lg whitespace-nowrap ${
-              activeTab === 'pipeline' ? 'bg-sky-600 text-white' : 'text-slate-400 bg-slate-800/40'
-            }`}
-          >
-            AI Lab
           </button>
           <button
             onClick={() => setActiveTab('admin')}

@@ -9,7 +9,7 @@ services:
       - key: NODE_ENV
         value: production
       - key: APP_URL
-        generateValue: false
+        value: https://tele-to-x-bot.onrender.com
       - key: TELEGRAM_BOT_TOKEN
         generateValue: false
       - key: GEMINI_API_KEY

@@ -323,18 +323,56 @@ export class XClient {
   public async fetchRecentTweets(
     authorHandle: string,
     sinceId?: string,
-    overrideBearer?: string
+    overrideBearerOrTokens?: string | { bearerToken?: string; oauth2AccessToken?: string }
   ): Promise<XTweet[]> {
-    const handle = authorHandle.replace('@', '').trim();
-    const bearer = overrideBearer || this.defaultBearerToken;
-
-    if (!bearer || bearer.trim() === '' || bearer.includes('TODO')) {
-      throw new Error(
-        `Official X API requires a valid TWITTER_BEARER_TOKEN or OAuth 2.0 Access Token to monitor @${handle}. Set TWITTER_BEARER_TOKEN in environment variables.`
-      );
+    // If authorHandle is a URL (e.g. https://x.com/OpenAI or twitter.com/user), extract the username for API lookup
+    let handle = authorHandle.trim();
+    const urlMatch = handle.match(/(?:https?:\/\/)?(?:www\.)?(?:twitter\.com|x\.com)\/([a-zA-Z0-9_]{1,25})/i);
+    if (urlMatch) {
+      handle = urlMatch[1];
+    } else {
+      handle = handle.replace(/^@+/, '').trim();
     }
 
-    return await this.fetchViaOfficialApi(handle, sinceId, bearer.trim());
+    let candidateTokens: string[] = [];
+    if (typeof overrideBearerOrTokens === 'string' && overrideBearerOrTokens.trim()) {
+      candidateTokens.push(overrideBearerOrTokens.trim());
+    } else if (overrideBearerOrTokens && typeof overrideBearerOrTokens === 'object') {
+      if (overrideBearerOrTokens.bearerToken?.trim()) {
+        candidateTokens.push(overrideBearerOrTokens.bearerToken.trim());
+      }
+      if (overrideBearerOrTokens.oauth2AccessToken?.trim()) {
+        candidateTokens.push(overrideBearerOrTokens.oauth2AccessToken.trim());
+      }
+    }
+
+    if (this.defaultBearerToken && this.defaultBearerToken.trim() && !this.defaultBearerToken.includes('TODO')) {
+      candidateTokens.push(this.defaultBearerToken.trim());
+    }
+
+    // Deduplicate candidate tokens
+    candidateTokens = candidateTokens.filter((t, idx, arr) => arr.indexOf(t) === idx && t.length > 10);
+
+    if (candidateTokens.length === 0) {
+      const err = new Error(
+        `Official X API requires a valid TWITTER_BEARER_TOKEN or connected X OAuth 2.0 account to monitor ${authorHandle}.`
+      );
+      (err as any).isMissingToken = true;
+      throw err;
+    }
+
+    let lastError: Error | null = null;
+    for (const bearer of candidateTokens) {
+      try {
+        return await this.fetchViaOfficialApi(handle, sinceId, bearer);
+      } catch (err: unknown) {
+        lastError = err instanceof Error ? err : new Error(String(err));
+        // If credits depleted or 403, try next candidate token if available
+        continue;
+      }
+    }
+
+    throw lastError || new Error(`Failed polling ${authorHandle} via Official X API`);
   }
 
   private async fetchViaOfficialApi(handle: string, sinceId: string | undefined, bearer: string): Promise<XTweet[]> {
@@ -346,6 +384,13 @@ export class XClient {
     const userJson = (await userRes.json()) as any;
     if (!userRes.ok || !userJson.data?.id) {
       const errDetail = userJson.detail || userJson.errors?.[0]?.message || userRes.statusText;
+      if (errDetail?.toLowerCase().includes('credits depleted')) {
+        const err = new Error(
+          `Official X API read quota depleted for @${handle} (credits depleted). Twitter Developer accounts on Free tier allow write access (Telegram ➔ X), while timeline read access requires X API credits or an updated TWITTER_BEARER_TOKEN.`
+        );
+        (err as any).isCreditsDepleted = true;
+        throw err;
+      }
       throw new Error(`Official X API user lookup for @${handle} failed: ${errDetail}`);
     }
     const xUserId = userJson.data.id;

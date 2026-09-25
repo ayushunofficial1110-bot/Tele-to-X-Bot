@@ -34,8 +34,8 @@ Render के **"Environment"** टैब में जाकर **"Add Environm
    - *विवरण:* Express और React को प्रोडक्शन ऑप्टिमाइज़्ड मोड में चलाता है।
 
 2. **`APP_URL`**
-   - **Value:** `https://your-service-name.onrender.com`
-   - *विवरण:* Render आपको जो लाइव URL देगा, उसे यहाँ डालें (बिना आखिरी स्लैश के)। यह Telegram webhook और OAuth कॉलबैक के लिए जरूरी है।
+   - **Value:** `https://tele-to-x-bot.onrender.com`
+   - *विवरण:* Render का लाइव URL (बिना आखिरी स्लैश के)। Telegram बटन, वेबहुक और X OAuth कॉलबैक के लिए यह अनिवार्य है (Telegram कभी भी localhost URL को स्वीकार नहीं करता)।
 
 3. **`TELEGRAM_BOT_TOKEN`**
    - **Value:** `@BotFather` से मिला बॉट टोकन (उदा. `123456789:ABCdefGHIjklMNOpqr...`)

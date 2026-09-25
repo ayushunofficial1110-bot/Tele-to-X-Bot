@@ -103,7 +103,7 @@ Rules:
 - Posts explicitly selling products, demanding signups via referral codes, shilling tokens/presales/giveaways, using sponsored hashtags (#ad, #sponsored), or pushing affiliate links ARE ads.`;
 
     const response = await ai.models.generateContent({
-      model: 'gemini-3.8-flash',
+      model: 'gemini-2.5-flash',
       contents: prompt,
       config: {
         responseMimeType: 'application/json',
@@ -186,7 +186,7 @@ ${content}
 """`;
 
       const response = await ai.models.generateContent({
-        model: 'gemini-3.8-flash',
+        model: 'gemini-2.5-flash',
         contents: prompt,
         config: {
           responseMimeType: 'application/json',
@@ -245,7 +245,7 @@ ${content}
 """`;
 
       const response = await ai.models.generateContent({
-        model: 'gemini-3.8-flash',
+        model: 'gemini-2.5-flash',
         contents: prompt,
         config: {
           temperature: 0.3, // Low temperature for factual precision

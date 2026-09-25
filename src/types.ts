@@ -149,12 +149,15 @@ export interface SystemStats {
 }
 
 export interface SystemSettings {
-  botToken: string;
   botUsername: string;
-  webhookUrl: string;
-  isWebhookActive: boolean;
-  adminSecret: string;
-  autoProcessSampleQueue: boolean;
+  hasTelegramToken?: boolean;
+  hasAdminKey?: boolean;
+  hasMongoUri?: boolean;
+  hasGeminiKey?: boolean;
+  hasTwitterCreds?: boolean;
+  isTokenUnauthorized?: boolean;
+  isPolling?: boolean;
+  lastUpdateId?: number;
 }
 
 export interface TelegramInlineButton {

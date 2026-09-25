@@ -7,9 +7,15 @@ export class SourceMonitor {
   private timer: NodeJS.Timeout | null = null;
   private isChecking = false;
   private checkIntervalMs = 60000; // Poll every 60 seconds
+  // Tracks cooldowns per automation (e.g. rate limit, credits depleted) to prevent rapid error loops
+  private pollCooldowns: Map<string, { nextCheck: number; lastError: string; isDepleted: boolean }> = new Map();
 
   constructor() {
     this.start();
+  }
+
+  public resetCooldown(autoId: string) {
+    this.pollCooldowns.delete(autoId);
   }
 
   public start() {
@@ -42,6 +48,11 @@ export class SourceMonitor {
         const autos = db.getAutomations(u.id);
         for (const a of autos) {
           if (a.status === 'active' && a.direction === 'x_to_telegram') {
+            // Check if automation is currently in backoff cooldown
+            const cooldown = this.pollCooldowns.get(a.id);
+            if (cooldown && Date.now() < cooldown.nextCheck) {
+              continue;
+            }
             activeXAutomations.push({ user: u, auto: a });
           }
         }
@@ -54,7 +65,7 @@ export class SourceMonitor {
       }
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
-      db.logSystem('warn', 'monitor', `Source monitor cycle notice: ${msg}`);
+      db.logSystem('info', 'monitor', `Source monitor cycle check: ${msg}`);
     } finally {
       this.isChecking = false;
     }
@@ -65,16 +76,24 @@ export class SourceMonitor {
     if (!handle) return;
 
     try {
+      const creds = user?.settings?.xCredentials;
       const tweets = await xClient.fetchRecentTweets(
         handle,
         auto.lastSeenPostId,
-        user.settings?.xCredentials?.bearerToken
+        {
+          bearerToken: creds?.bearerToken,
+          oauth2AccessToken: creds?.oauth2AccessToken,
+        }
       );
+
+      // On successful query, clear any prior cooldown and error state
+      this.pollCooldowns.delete(auto.id);
 
       if (!tweets || tweets.length === 0) {
         // Record last poll time
         db.updateAutomation(auto.id, auto.userId, {
           lastPollAt: new Date().toISOString(),
+          lastError: undefined,
         });
         return;
       }
@@ -96,15 +115,50 @@ export class SourceMonitor {
       }
 
       // Update last seen ID in database
-      if (newestId && newestId !== auto.lastSeenPostId) {
-        db.updateAutomation(auto.id, auto.userId, {
-          lastSeenPostId: newestId,
-          lastPollAt: new Date().toISOString(),
-        });
-      }
+      db.updateAutomation(auto.id, auto.userId, {
+        lastSeenPostId: newestId && newestId !== auto.lastSeenPostId ? newestId : auto.lastSeenPostId,
+        lastPollAt: new Date().toISOString(),
+        lastError: undefined,
+      });
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
-      db.logSystem('warn', 'monitor', `Failed polling X handle ${handle}: ${msg}`, auto.userId);
+      const isCreditsDepleted = Boolean(
+        (err as any)?.isCreditsDepleted || msg.toLowerCase().includes('credits depleted')
+      );
+      const isRateLimit = msg.toLowerCase().includes('rate limit') || msg.includes('429');
+
+      // Backoff duration: 60 minutes for depleted credits, 15m for rate limit, 5m for transient
+      const cooldownMs = isCreditsDepleted ? 60 * 60 * 1000 : isRateLimit ? 15 * 60 * 1000 : 5 * 60 * 1000;
+      const cooldownMinutes = Math.round(cooldownMs / 60000);
+
+      const prevCooldown = this.pollCooldowns.get(auto.id);
+      const isStatusTransition = !prevCooldown || prevCooldown.isDepleted !== isCreditsDepleted;
+
+      this.pollCooldowns.set(auto.id, {
+        nextCheck: Date.now() + cooldownMs,
+        lastError: msg,
+        isDepleted: isCreditsDepleted,
+      });
+
+      // Provide clear user-facing guidance
+      const friendlyNotice = isCreditsDepleted
+        ? `X API read quota depleted for ${handle}. Official X Developer Free Tier supports posting to X (Telegram ➔ X), but reading timelines requires X API Basic credits. Check back after credits refresh or update TWITTER_BEARER_TOKEN.`
+        : msg;
+
+      db.updateAutomation(auto.id, auto.userId, {
+        lastError: friendlyNotice,
+        lastPollAt: new Date().toISOString(),
+      });
+
+      // Log only on initial transition as an informative notice with cooldown info, NOT repeating spam
+      if (isStatusTransition) {
+        db.logSystem(
+          'info',
+          'monitor',
+          `Polling paused for X source ${handle}: ${friendlyNotice} (Next automatic check in ${cooldownMinutes}m)`,
+          auto.userId
+        );
+      }
     }
   }
 

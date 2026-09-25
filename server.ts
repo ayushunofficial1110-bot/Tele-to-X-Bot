@@ -3,30 +3,31 @@ import path from 'path';
 import fs from 'fs';
 import { db } from './server/db.ts';
 import { telegramBot } from './server/telegramBot.ts';
-import { telegramClient, parseTelegramChannelInput } from './server/telegramClient.ts';
+import { telegramClient, parseTelegramChannelInput, formatXInput, isXUrl } from './server/telegramClient.ts';
 import { xClient } from './server/xClient.ts';
 import { sourceMonitor } from './server/monitor.ts';
 import { automationQueue } from './server/queue.ts';
 import { detectAdOrPromotion, rewriteSocialPost } from './server/gemini.ts';
+import { getAppUrl } from './server/config.ts';
 
 const PORT = Number(process.env.PORT) || 3000;
 
 // OAuth 2.0 PKCE Session Map (isolated per request state)
 const oauthSessions = new Map<string, { userId: string; codeVerifier: string; redirectUri: string; createdAt: number }>();
 
-// Admin Security Middleware (Protected by ADMIN_KEY env var)
+// Admin Security Middleware (Protected strictly by ADMIN_KEY env var)
 const requireAdmin = (req: express.Request, res: express.Response, next: express.NextFunction) => {
   const adminKey = (req.headers['x-admin-key'] as string) || (req.query.adminKey as string);
-  const configuredKey = process.env.ADMIN_KEY || db.getSettings().adminSecret;
+  const configuredKey = (process.env.ADMIN_KEY || '').trim();
 
-  if (!configuredKey || configuredKey.trim() === '') {
+  if (!configuredKey) {
     return res.status(500).json({
       ok: false,
       error: 'ADMIN_KEY is not configured on the server. Please set ADMIN_KEY in your environment variables.',
     });
   }
 
-  if (!adminKey || adminKey.trim() !== configuredKey.trim()) {
+  if (!adminKey || adminKey.trim() !== configuredKey) {
     return res.status(401).json({ ok: false, error: 'Unauthorized: Invalid or missing ADMIN_KEY' });
   }
   next();
@@ -41,6 +42,7 @@ async function startServer() {
   isServerStarted = true;
 
   const app = express();
+  app.enable('trust proxy');
   app.use(express.json());
 
   // --- Health Check ---
@@ -49,20 +51,17 @@ async function startServer() {
       status: 'ok',
       uptime: process.uptime(),
       time: new Date().toISOString(),
+      appUrl: getAppUrl(),
+      env: process.env.NODE_ENV || 'development',
     });
   });
 
-  // --- Telegram Webhook (For production Telegram deployment) ---
-  app.post('/api/telegram/webhook', async (req, res) => {
-    try {
-      const update = req.body;
-      const response = await telegramBot.handleUpdate(update, true);
-      res.json({ ok: true, response });
-    } catch (err: unknown) {
-      const message = err instanceof Error ? err.message : String(err);
-      db.logSystem('error', 'telegram_bot', `Webhook handling failed: ${message}`);
-      res.status(500).json({ ok: false, error: message });
-    }
+  // --- Telegram Webhook (Disabled: Personal Bot operates strictly via Telegram Long Polling) ---
+  app.all('/api/telegram/webhook', (_req, res) => {
+    res.status(410).json({
+      ok: false,
+      error: 'Telegram webhook is disabled. This personal bot operates exclusively via Telegram Long Polling.',
+    });
   });
 
   // --- Telegram Channel Verification & Permission Check ---
@@ -94,7 +93,8 @@ async function startServer() {
         return res.status(404).json({ ok: false, error: 'User not found' });
       }
 
-      const redirectUri = `${req.protocol}://${req.get('host')}/api/auth/x/callback`;
+      const appUrl = getAppUrl();
+      const redirectUri = `${appUrl}/api/auth/x/callback`;
       const { verifier, challenge } = xClient.generatePKCE();
       const state = `xstate_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
 
@@ -110,6 +110,11 @@ async function startServer() {
         state,
         codeChallenge: challenge,
       });
+
+      // If opened directly from Telegram or web browser link, redirect immediately to X authorization
+      if (req.accepts('html') && !req.xhr && !req.headers.accept?.includes('application/json')) {
+        return res.redirect(authUrl);
+      }
 
       res.json({ ok: true, url: authUrl, state });
     } catch (err: unknown) {
@@ -196,78 +201,11 @@ async function startServer() {
     res.json({ ok: true });
   });
 
-  // --- Telegram Browser Simulator Endpoint ---
-  app.post('/api/telegram/simulate', async (req, res) => {
-    try {
-      const { userId, text, callbackData } = req.body;
-      let user = userId ? db.getUser(userId) : undefined;
-      
-      // If no user specified or found, get or create a simulator user
-      if (!user) {
-        user = db.getUsers()[0];
-        if (!user) {
-          // Register first user on the fly
-          const tgId = '10000001';
-          user = db.upsertUser({
-            id: `usr_${tgId}`,
-            telegramId: tgId,
-            telegramUsername: '@telegram_user',
-            firstName: 'Demo User',
-            authToken: `tga_${tgId}_init`,
-            plan: 'free',
-            postsProcessedCount: 0,
-            postsFailedCount: 0,
-            postsFilteredAdsCount: 0,
-            status: 'active',
-            settings: {
-              autoRewrite: true,
-              adFilterEnabled: true,
-              preserveFactsStrict: true,
-              defaultPostFormat: 'auto',
-              xCredentials: {},
-            },
-            createdAt: new Date().toISOString(),
-            lastActiveAt: new Date().toISOString(),
-          });
-        }
-      }
-
-      let updatePayload: any;
-      const numTgId = parseInt(user.telegramId) || 10000001;
-
-      if (callbackData) {
-        updatePayload = {
-          callback_query: {
-            id: `cb_${Date.now()}`,
-            from: {
-              id: numTgId,
-              username: user.telegramUsername.replace('@', ''),
-              first_name: user.firstName,
-            },
-            data: callbackData,
-          },
-        };
-      } else {
-        updatePayload = {
-          message: {
-            message_id: Date.now(),
-            from: {
-              id: numTgId,
-              username: user.telegramUsername.replace('@', ''),
-              first_name: user.firstName,
-            },
-            chat: { id: numTgId },
-            text: text || '/start',
-          },
-        };
-      }
-
-      const response = await telegramBot.handleUpdate(updatePayload);
-      res.json({ ok: true, response, user });
-    } catch (err: unknown) {
-      const message = err instanceof Error ? err.message : String(err);
-      res.status(500).json({ ok: false, error: message });
-    }
+  // --- Public Bot Info ---
+  app.get('/api/telegram/info', (_req, res) => {
+    const settings = db.getSettings();
+    const botUsername = (settings.botUsername || process.env.TELEGRAM_BOT_USERNAME || '').replace('@', '');
+    res.json({ ok: true, botUsername });
   });
 
   // --- User Authentication & Management ---
@@ -297,9 +235,9 @@ async function startServer() {
     res.json({ ok: true, user });
   });
 
-  // Register or authenticate via web simulation / direct telegram input
+  // Authenticate existing registered telegram user via Web Gateway
   app.post('/api/user/register-or-login', (req, res) => {
-    const { telegramHandle, firstName } = req.body;
+    const { telegramHandle } = req.body;
     if (!telegramHandle) {
       return res.status(400).json({ ok: false, error: 'Telegram handle or ID is required' });
     }
@@ -308,33 +246,16 @@ async function startServer() {
       ? telegramHandle.trim()
       : `@${telegramHandle.trim()}`;
 
-    let user = db.getUser(cleanHandle);
+    const user = db.getUser(cleanHandle);
     if (!user) {
-      const generatedTgId = String(Math.floor(10000000 + Math.random() * 90000000));
-      user = db.upsertUser({
-        id: `usr_${generatedTgId}`,
-        telegramId: generatedTgId,
-        telegramUsername: cleanHandle,
-        firstName: firstName || cleanHandle.replace('@', ''),
-        authToken: `tga_${generatedTgId}_${Math.random().toString(36).substring(2, 8)}`,
-        plan: 'free',
-        postsProcessedCount: 0,
-        postsFailedCount: 0,
-        postsFilteredAdsCount: 0,
-        status: 'active',
-        settings: {
-          autoRewrite: true,
-          adFilterEnabled: true,
-          preserveFactsStrict: true,
-          defaultPostFormat: 'auto',
-          xCredentials: {},
-        },
-        createdAt: new Date().toISOString(),
-        lastActiveAt: new Date().toISOString(),
+      return res.status(404).json({
+        ok: false,
+        error: 'Account not found. Please message your Telegram bot and send /start to activate your dashboard.',
       });
-      db.logSystem('info', 'api', `New user registered via Web Gateway: ${cleanHandle}`, user.id);
     }
 
+    user.lastActiveAt = new Date().toISOString();
+    db.upsertUser(user);
     res.json({ ok: true, user });
   });
 
@@ -380,13 +301,13 @@ async function startServer() {
       let cleanDestination = destination.trim();
 
       if (direction === 'x_to_telegram') {
-        if (!cleanSource.startsWith('@')) cleanSource = `@${cleanSource}`;
+        cleanSource = formatXInput(cleanSource);
         const parsed = parseTelegramChannelInput(cleanDestination);
         if (parsed.valid) cleanDestination = parsed.canonical;
       } else {
         const parsed = parseTelegramChannelInput(cleanSource);
         if (parsed.valid) cleanSource = parsed.canonical;
-        if (!cleanDestination.startsWith('@')) cleanDestination = `@${cleanDestination}`;
+        cleanDestination = formatXInput(cleanDestination);
       }
 
       const created = db.createAutomation({
@@ -441,13 +362,40 @@ async function startServer() {
       const auto = db.getAutomation(id, userId);
       if (!auto) return res.status(404).json({ ok: false, error: 'Automation not found' });
 
+      sourceMonitor.resetCooldown(id);
+
       if (auto.direction === 'x_to_telegram') {
         const user = db.getUser(userId);
-        const tweets = await xClient.fetchRecentTweets(
-          auto.source,
-          auto.lastSeenPostId,
-          user?.settings.xCredentials.bearerToken
-        );
+        const creds = user?.settings?.xCredentials;
+        let tweets;
+        try {
+          tweets = await xClient.fetchRecentTweets(
+            auto.source,
+            auto.lastSeenPostId,
+            {
+              bearerToken: creds?.bearerToken,
+              oauth2AccessToken: creds?.oauth2AccessToken,
+            }
+          );
+        } catch (pollErr: unknown) {
+          const pollMsg = pollErr instanceof Error ? pollErr.message : String(pollErr);
+          const isCreditsDepleted = pollMsg.toLowerCase().includes('credits depleted');
+          const notice = isCreditsDepleted
+            ? `Official X API read quota is currently depleted for ${auto.source}. Free tier permits posting to X (Telegram ➔ X), but reading requires X API Basic credits. You can still test your bridge using the 'Test Run' button.`
+            : pollMsg;
+
+          db.updateAutomation(auto.id, userId, {
+            lastError: notice,
+            lastPollAt: new Date().toISOString(),
+          });
+
+          return res.json({
+            ok: false,
+            isCreditsDepleted,
+            error: notice,
+            message: notice,
+          });
+        }
 
         if (tweets && tweets.length > 0) {
           for (const t of tweets) {
@@ -462,9 +410,15 @@ async function startServer() {
           db.updateAutomation(auto.id, userId, {
             lastSeenPostId: tweets[0].id,
             lastPollAt: new Date().toISOString(),
+            lastError: undefined,
           });
           return res.json({ ok: true, syncedCount: tweets.length, message: `Queued ${tweets.length} new tweets for processing!` });
         }
+
+        db.updateAutomation(auto.id, userId, {
+          lastPollAt: new Date().toISOString(),
+          lastError: undefined,
+        });
         return res.json({ ok: true, syncedCount: 0, message: 'Source checked. No new posts since last poll.' });
       } else {
         return res.json({ ok: true, syncedCount: 0, message: 'Channel automations continuously listen for new posts.' });
@@ -550,14 +504,14 @@ async function startServer() {
 
   app.post('/api/admin/verify-key', (req, res) => {
     const { adminKey } = req.body;
-    const configuredKey = process.env.ADMIN_KEY || db.getSettings().adminSecret;
-    if (!configuredKey || configuredKey.trim() === '') {
+    const configuredKey = (process.env.ADMIN_KEY || '').trim();
+    if (!configuredKey) {
       return res.status(500).json({
         ok: false,
         error: 'ADMIN_KEY is not configured on the server. Please set ADMIN_KEY in your environment variables.',
       });
     }
-    if (!adminKey || adminKey.trim() !== configuredKey.trim()) {
+    if (!adminKey || adminKey.trim() !== configuredKey) {
       return res.status(401).json({ ok: false, error: 'Invalid ADMIN_KEY' });
     }
     res.json({ ok: true });
@@ -647,36 +601,55 @@ async function startServer() {
   app.get('/api/admin/settings', requireAdmin, (req, res) => {
     const settings = db.getSettings();
     const botStatus = telegramBot.getBotStatus();
-    const masked = {
-      ...settings,
-      botTokenMasked: settings.botToken ? `${settings.botToken.slice(0, 7)}...${settings.botToken.slice(-4)}` : '',
+    const safeSettings = {
+      botUsername: settings.botUsername || process.env.TELEGRAM_BOT_USERNAME || '',
+      hasTelegramToken: Boolean(process.env.TELEGRAM_BOT_TOKEN && process.env.TELEGRAM_BOT_TOKEN.trim().length > 10),
+      hasAdminKey: Boolean(process.env.ADMIN_KEY && process.env.ADMIN_KEY.trim().length > 0),
+      hasMongoUri: Boolean(process.env.MONGODB_URI || process.env.MONGO_URI),
+      hasGeminiKey: Boolean(process.env.GEMINI_API_KEY),
+      hasTwitterCreds: Boolean(process.env.TWITTER_CLIENT_ID && process.env.TWITTER_CLIENT_SECRET),
       isTokenUnauthorized: botStatus.isTokenUnauthorized,
       isPolling: botStatus.isPolling,
-      hasToken: botStatus.hasToken,
+      lastUpdateId: botStatus.lastUpdateId,
     };
-    res.json({ ok: true, settings: masked });
+    res.json({ ok: true, settings: safeSettings });
   });
 
   app.post('/api/admin/settings', requireAdmin, (req, res) => {
-    const { botToken, botUsername, webhookUrl, adminSecret } = req.body;
-    const updated = db.updateSettings({
-      ...(botToken !== undefined && { botToken }),
-      ...(botUsername !== undefined && { botUsername }),
-      ...(webhookUrl !== undefined && { webhookUrl }),
-      ...(adminSecret !== undefined && { adminSecret }),
-    });
-    if (botToken) {
-      telegramBot.wakeUpPolling(botToken);
+    // Reject/ignore any credentials or secret fields: credentials must come ONLY from process.env
+    const forbiddenFields = [
+      'botToken',
+      'adminSecret',
+      'TELEGRAM_BOT_TOKEN',
+      'ADMIN_KEY',
+      'TWITTER_CLIENT_SECRET',
+      'TWITTER_BEARER_TOKEN',
+      'TWITTER_CLIENT_ID',
+      'GEMINI_API_KEY',
+      'MONGODB_URI',
+      'MONGO_URI',
+    ];
+    for (const field of forbiddenFields) {
+      if (req.body && req.body[field] !== undefined) {
+        delete req.body[field];
+      }
     }
+
+    const { botUsername } = req.body;
+    const updated = db.updateSettings({
+      ...(botUsername !== undefined && { botUsername }),
+    });
     res.json({ ok: true, settings: updated });
   });
 
   app.post('/api/admin/telegram-test', requireAdmin, async (req, res) => {
     try {
-      const { botToken } = req.body;
-      const token = (botToken || telegramClient.getActiveToken()).trim();
+      const token = telegramClient.getActiveToken();
       if (!token) {
-        return res.status(400).json({ ok: false, error: 'No Telegram bot token provided. Please enter a valid BotFather token.' });
+        return res.status(400).json({
+          ok: false,
+          error: 'TELEGRAM_BOT_TOKEN environment variable is not configured on the server.',
+        });
       }
 
       // 1. Test getMe
@@ -687,15 +660,10 @@ async function startServer() {
         if (meJson.error_code === 401 || meRes.status === 401) {
           return res.status(400).json({
             ok: false,
-            error: 'Telegram API 401: Unauthorized. The token is invalid, wrong, or was revoked by @BotFather. Generate a fresh token in @BotFather.',
+            error: 'Telegram API 401: Unauthorized. The TELEGRAM_BOT_TOKEN in your environment variables is invalid or was revoked by @BotFather.',
           });
         }
         return res.status(400).json({ ok: false, error: `Telegram Error [${meJson.error_code || meRes.status}]: ${desc}` });
-      }
-
-      // Save token if verified
-      if (botToken) {
-        db.updateSettings({ botToken });
       }
 
       // Ensure webhook is removed so long-polling operates cleanly
@@ -703,13 +671,17 @@ async function startServer() {
         await telegramClient.deleteWebhook(false, token);
       } catch {}
 
-      // Wake up bot polling with verified token
-      telegramBot.wakeUpPolling(token);
+      if (meJson.result?.username) {
+        db.updateSettings({ botUsername: meJson.result.username });
+      }
+
+      // Wake up bot polling with active token
+      telegramBot.wakeUpPolling();
 
       res.json({
         ok: true,
         botInfo: meJson.result,
-        message: `Connected successfully as @${meJson.result?.username}`,
+        message: `Verified and connected as @${meJson.result?.username}`,
       });
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);

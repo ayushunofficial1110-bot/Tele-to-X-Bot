@@ -8,6 +8,47 @@ export interface TelegramSendMessageOptions {
 }
 
 /**
+ * Checks whether an input string is an X (Twitter) URL (profile, post, or web link).
+ */
+export function isXUrl(input: string): boolean {
+  if (!input || typeof input !== 'string') return false;
+  const trimmed = input.trim();
+  return /^(?:https?:\/\/)?(?:www\.)?(?:twitter\.com|x\.com)\/[^\s]+/i.test(trimmed);
+}
+
+/**
+ * Normalizes an X input:
+ * - If it is an X/Twitter URL (e.g. https://x.com/OpenAI or twitter.com/user/status/123),
+ *   preserve it as a clickable URL exactly as a URL (ensuring https:// prefix).
+ *   NEVER prepend '@' or format as a Telegram @username!
+ * - If it is a handle without URL (e.g. OpenAI or @OpenAI), preserve the handle.
+ */
+export function formatXInput(input: string): string {
+  if (!input || typeof input !== 'string') return '';
+  const trimmed = input.trim();
+  if (isXUrl(trimmed)) {
+    if (/^https?:\/\//i.test(trimmed)) {
+      return trimmed;
+    }
+    return `https://${trimmed.replace(/^www\./i, '')}`;
+  }
+  return trimmed.startsWith('@') ? trimmed : `@${trimmed}`;
+}
+
+/**
+ * Extracts the raw username from an X handle or X URL for API queries.
+ */
+export function extractXUsername(input: string): string {
+  if (!input || typeof input !== 'string') return '';
+  const trimmed = input.trim();
+  const urlMatch = trimmed.match(/(?:https?:\/\/)?(?:www\.)?(?:twitter\.com|x\.com)\/([a-zA-Z0-9_]{1,25})/i);
+  if (urlMatch) {
+    return urlMatch[1];
+  }
+  return trimmed.replace(/^@+/, '').trim();
+}
+
+/**
  * Validates and parses any Telegram channel input (URL, handle, numeric ID)
  * into a canonical Telegram identifier without guessing.
  */
@@ -21,6 +62,16 @@ export function parseTelegramChannelInput(input: string): {
   }
 
   const trimmed = input.trim();
+
+  // Guard: X/Twitter URLs must NEVER be converted to Telegram channels or @usernames
+  if (isXUrl(trimmed) || /(?:twitter\.com|x\.com)/i.test(trimmed)) {
+    return {
+      valid: false,
+      canonical: trimmed,
+      error:
+        'An X (Twitter) URL cannot be used as a Telegram channel. Telegram channels use @channel_name or https://t.me/channel_name.',
+    };
+  }
 
   // 1. Private channel web link format: t.me/c/1234567890/1
   const privateWebMatch = trimmed.match(/^(?:https?:\/\/)?(?:www\.)?t(?:elegram)?\.me\/c\/(\d+)(?:\/\d+)?\/?$/i);
@@ -66,16 +117,15 @@ export function parseTelegramChannelInput(input: string): {
 
 export class TelegramClient {
   public getActiveToken(overrideToken?: string): string {
-    const adminToken = db.getSettings().botToken?.trim();
-    const envToken = process.env.TELEGRAM_BOT_TOKEN?.trim();
-    const token = overrideToken?.trim() || adminToken || envToken || '';
-    return token.trim();
+    const envToken = (process.env.TELEGRAM_BOT_TOKEN || '').trim();
+    const token = (overrideToken || envToken).trim();
+    return token;
   }
 
   private getBotToken(overrideToken?: string): string {
     const token = this.getActiveToken(overrideToken);
     if (!token || token.trim() === '' || token.includes('TODO')) {
-      throw new Error('Telegram Bot Token is not configured. Set TELEGRAM_BOT_TOKEN in environment or configure in Admin Panel.');
+      throw new Error('Telegram Bot Token is not configured. Please set TELEGRAM_BOT_TOKEN in environment variables.');
     }
     return token.trim();
   }
@@ -376,16 +426,8 @@ export class TelegramClient {
     }
   }
 
-  public async setWebhook(url: string, secretToken?: string, overrideToken?: string): Promise<any> {
-    return this.callApi(
-      'setWebhook',
-      {
-        url,
-        secret_token: secretToken,
-        allowed_updates: ['message', 'channel_post', 'callback_query', 'my_chat_member'],
-      },
-      overrideToken
-    );
+  public async setWebhook(): Promise<never> {
+    throw new Error('Telegram setWebhook is disabled. This personal bot operates exclusively via Long Polling.');
   }
 
   public async deleteWebhook(dropPendingUpdates = false, overrideToken?: string): Promise<any> {

@@ -1,19 +1,18 @@
 import React, { useState, useEffect } from 'react';
 import { Navbar } from './components/Navbar.tsx';
-import { TelegramSimulator } from './components/TelegramSimulator.tsx';
 import { UserDashboard } from './components/UserDashboard.tsx';
-import { PipelineLab } from './components/PipelineLab.tsx';
 import { AdminDashboard } from './components/AdminDashboard.tsx';
 import { GuideModal } from './components/GuideModal.tsx';
 import { BotUser, Automation } from './types.ts';
 import { Send, Key, ArrowRight, Shield, Sparkles, CheckCircle2, UserCheck, Bot } from 'lucide-react';
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState<'simulator' | 'dashboard' | 'pipeline' | 'admin'>('dashboard');
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'admin'>('dashboard');
   const [currentUser, setCurrentUser] = useState<BotUser | null>(null);
   const [automations, setAutomations] = useState<Automation[]>([]);
   const [isGuideOpen, setIsGuideOpen] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [botUsername, setBotUsername] = useState<string>('');
 
   // Login / Registration Form State
   const [handleInput, setHandleInput] = useState('');
@@ -21,9 +20,17 @@ export default function App() {
   const [loginError, setLoginError] = useState<string | null>(null);
   const [showLoginModal, setShowLoginModal] = useState(false);
 
-  // Initial Auth Check
+  // Initial Auth Check and Public Bot Info
   useEffect(() => {
     checkInitialAuth();
+    fetch('/api/telegram/info')
+      .then((res) => res.json())
+      .then((data) => {
+        if (data.ok && data.botUsername) {
+          setBotUsername(data.botUsername);
+        }
+      })
+      .catch(() => {});
   }, []);
 
   // When currentUser changes, reload their isolated automations
@@ -87,8 +94,7 @@ export default function App() {
     setLoginError(null);
 
     try {
-      // First try authenticating with token or handle
-      let res = await fetch('/api/user/auth-by-token', {
+      const res = await fetch('/api/user/auth-by-token', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -97,17 +103,7 @@ export default function App() {
           telegramId: handleInput.trim(),
         }),
       });
-      let data = await res.json();
-
-      // If not found, register new user on the fly via web gateway
-      if (!data.ok) {
-        res = await fetch('/api/user/register-or-login', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ telegramHandle: handleInput.trim() }),
-        });
-        data = await res.json();
-      }
+      const data = await res.json();
 
       if (data.ok && data.user) {
         setCurrentUser(data.user);
@@ -115,31 +111,12 @@ export default function App() {
         setShowLoginModal(false);
         setActiveTab('dashboard');
       } else {
-        setLoginError(data.error || 'Authentication failed. Please check your credentials.');
+        setLoginError(
+          'Account not found. Please message your Telegram bot and send /start to receive your secure dashboard login link.'
+        );
       }
     } catch {
       setLoginError('Connection error during authentication.');
-    } finally {
-      setIsLoggingIn(false);
-    }
-  };
-
-  const handleLaunchSimulator = async () => {
-    setIsLoggingIn(true);
-    try {
-      const res = await fetch('/api/telegram/simulate', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text: '/start' }),
-      });
-      const data = await res.json();
-      if (data.ok && data.user) {
-        setCurrentUser(data.user);
-        localStorage.setItem('x2tg_auth_token', data.user.authToken);
-        setActiveTab('simulator');
-      }
-    } catch (err) {
-      console.error('Failed to launch simulator session:', err);
     } finally {
       setIsLoggingIn(false);
     }
@@ -181,8 +158,8 @@ export default function App() {
 
       {/* Main Content Area */}
       <main className="flex-1 pb-16">
-        {/* If user is not logged in and not on admin or pipeline tab, show login gateway */}
-        {!currentUser && activeTab !== 'admin' && activeTab !== 'pipeline' ? (
+        {/* If user is not logged in and not on admin tab, show login gateway */}
+        {!currentUser && activeTab !== 'admin' ? (
           <div className="max-w-4xl mx-auto px-4 py-12">
             <div className="text-center mb-10 space-y-3">
               <div className="inline-flex items-center space-x-2 px-3 py-1 rounded-full bg-sky-500/10 border border-sky-500/20 text-sky-400 text-xs font-semibold">
@@ -226,14 +203,23 @@ export default function App() {
                 </div>
 
                 <div className="mt-6 pt-6 border-t border-slate-800">
-                  <button
-                    onClick={handleLaunchSimulator}
-                    disabled={isLoggingIn}
-                    className="w-full py-2.5 px-4 bg-sky-600 hover:bg-sky-500 disabled:opacity-50 text-white rounded-xl text-xs font-semibold shadow-lg shadow-sky-600/20 transition flex items-center justify-center space-x-2"
-                  >
-                    <Send className="w-4 h-4" />
-                    <span>Launch Interactive Bot Chat</span>
-                  </button>
+                  {botUsername ? (
+                    <a
+                      href={`https://t.me/${botUsername}`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="w-full py-2.5 px-4 bg-sky-600 hover:bg-sky-500 text-white rounded-xl text-xs font-semibold shadow-lg shadow-sky-600/20 transition flex items-center justify-center space-x-2"
+                    >
+                      <Send className="w-4 h-4" />
+                      <span>Open Bot on Telegram (@{botUsername})</span>
+                    </a>
+                  ) : (
+                    <div className="p-3 bg-slate-950/80 border border-slate-800 rounded-xl text-center">
+                      <p className="text-xs text-slate-300 font-medium">
+                        Open Telegram and send <code className="text-sky-300 font-mono">/start</code> to your bot
+                      </p>
+                    </div>
+                  )}
                 </div>
               </div>
 
@@ -302,16 +288,6 @@ export default function App() {
                 onRefresh={handleRefresh}
               />
             )}
-
-            {activeTab === 'simulator' && currentUser && (
-              <TelegramSimulator
-                currentUser={currentUser}
-                automations={automations}
-                onAutomationChange={handleRefresh}
-              />
-            )}
-
-            {activeTab === 'pipeline' && <PipelineLab />}
 
             {activeTab === 'admin' && <AdminDashboard />}
           </>

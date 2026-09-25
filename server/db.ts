@@ -2,6 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import crypto from 'node:crypto';
 import { MongoClient, Db as MongoDatabase } from 'mongodb';
+import { getAppUrl, getTelegramButtonUrl } from './config.ts';
 import {
   BotUser,
   Automation,
@@ -27,12 +28,7 @@ export interface DatabaseSchema {
 const startTime = Date.now();
 
 const DEFAULT_SETTINGS: SystemSettings = {
-  botToken: process.env.TELEGRAM_BOT_TOKEN || '',
-  botUsername: 'X2TelegramBot',
-  webhookUrl: `${process.env.APP_URL || 'http://localhost:3000'}/api/telegram/webhook`,
-  isWebhookActive: false,
-  adminSecret: process.env.ADMIN_KEY || '',
-  autoProcessSampleQueue: true,
+  botUsername: process.env.TELEGRAM_BOT_USERNAME || 'TeleToXBot',
 };
 
 export function computeContentHash(content: string, urls: string[] = []): string {
@@ -130,15 +126,9 @@ class Database {
       if (posts.length > 0) this.data.posts = posts;
       if (otherBots.length > 0) this.data.otherBots = otherBots;
       if (settingsDoc?.settings) {
-        this.data.settings = {
-          ...DEFAULT_SETTINGS,
-          ...settingsDoc.settings,
-          botToken: (settingsDoc.settings.botToken || process.env.TELEGRAM_BOT_TOKEN || '').trim(),
-          adminSecret: (settingsDoc.settings.adminSecret || process.env.ADMIN_KEY || '').trim(),
-        };
+        this.data.settings = this.sanitizeSettings(settingsDoc.settings);
       }
 
-      this.persistLocal();
       this.logSystem(
         'info',
         'mongodb',
@@ -152,9 +142,6 @@ class Database {
 
   private loadLocal(): DatabaseSchema {
     try {
-      if (!fs.existsSync(DATA_DIR)) {
-        fs.mkdirSync(DATA_DIR, { recursive: true });
-      }
       if (fs.existsSync(DB_FILE)) {
         const raw = fs.readFileSync(DB_FILE, 'utf-8');
         const parsed = JSON.parse(raw);
@@ -164,52 +151,56 @@ class Database {
           posts: Array.isArray(parsed.posts) ? parsed.posts : [],
           otherBots: Array.isArray(parsed.otherBots) ? parsed.otherBots : [],
           systemLogs: Array.isArray(parsed.systemLogs) ? parsed.systemLogs : [],
-          settings: { ...DEFAULT_SETTINGS, ...(parsed.settings || {}) },
+          settings: this.sanitizeSettings(parsed.settings || {}),
         };
       }
     } catch (err) {
-      console.error('[DB] Failed to read database file, initializing clean database:', err);
+      // In production with MongoDB, data/db.json is never required
     }
 
-    const initial: DatabaseSchema = {
+    return {
       users: [],
       automations: [],
       posts: [],
       otherBots: [],
-      systemLogs: [
-        {
-          id: 'log_init',
-          timestamp: new Date().toISOString(),
-          level: 'info',
-          source: 'engine',
-          message: 'Public Multi-User Bot Engine initialized with isolated tenancy.',
-        },
-      ],
-      settings: DEFAULT_SETTINGS,
+      systemLogs: [],
+      settings: this.sanitizeSettings(DEFAULT_SETTINGS),
     };
-    this.saveLocalData(initial);
-    return initial;
   }
 
   private saveLocalData(dataToSave: DatabaseSchema) {
+    // When MongoDB is connected, data/ directory is never required
+    if (this.isMongoConnected) {
+      return;
+    }
+
     try {
       if (!fs.existsSync(DATA_DIR)) {
         fs.mkdirSync(DATA_DIR, { recursive: true });
       }
       // Zero secrets in db.json: botToken and adminSecret are strictly kept in memory / environment
       const safeData = {
-        ...dataToSave,
+        users: dataToSave.users.map((u) => ({
+          ...u,
+          settings: {
+            ...u.settings,
+            xCredentials: {}, // Never store X tokens or client secrets in local disk
+          },
+        })),
+        automations: dataToSave.automations,
+        posts: dataToSave.posts.slice(-100),
+        otherBots: dataToSave.otherBots,
+        systemLogs: dataToSave.systemLogs.slice(-100),
         settings: {
-          ...dataToSave.settings,
-          botToken: '', // NEVER write secrets or tokens to disk
-          adminSecret: '', // NEVER write secrets or passwords to disk
+          botUsername: dataToSave.settings?.botUsername || '',
         },
       };
       const tmpPath = `${DB_FILE}.tmp.${Date.now()}`;
       fs.writeFileSync(tmpPath, JSON.stringify(safeData, null, 2), 'utf-8');
       fs.renameSync(tmpPath, DB_FILE);
     } catch (err) {
-      console.error('[DB] Failed to persist data to disk:', err);
+      // Non-fatal if filesystem is read-only
+      console.warn('[DB] Local file write notice (non-fatal):', err instanceof Error ? err.message : err);
     }
   }
 
@@ -219,39 +210,13 @@ class Database {
 
   // --- Owner & Personal Bot Settings ---
 
-  public getOwner(): BotUser {
-    let owner = this.data.users[0];
-    if (!owner) {
-      owner = {
-        id: 'owner_personal',
-        telegramId: process.env.OWNER_TELEGRAM_ID || '10000001',
-        telegramUsername: '@owner',
-        firstName: 'Owner',
-        authToken: `tga_owner_${crypto.randomBytes(8).toString('hex')}`,
-        plan: 'enterprise',
-        postsProcessedCount: 0,
-        postsFailedCount: 0,
-        postsFilteredAdsCount: 0,
-        status: 'active',
-        settings: {
-          autoRewrite: true,
-          adFilterEnabled: true,
-          preserveFactsStrict: true,
-          defaultPostFormat: 'auto',
-          xCredentials: {
-            bearerToken: process.env.TWITTER_BEARER_TOKEN || '',
-            apiKey: process.env.TWITTER_CLIENT_ID || '',
-            apiSecret: process.env.TWITTER_CLIENT_SECRET || '',
-          },
-          telegramChannelId: process.env.TELEGRAM_CHANNEL_ID || '',
-        },
-        createdAt: new Date().toISOString(),
-        lastActiveAt: new Date().toISOString(),
-      };
-      this.data.users.push(owner);
-      this.persistLocal();
+  public getOwner(): BotUser | undefined {
+    const ownerTgId = process.env.OWNER_TELEGRAM_ID?.trim();
+    if (ownerTgId) {
+      const user = this.data.users.find((u) => u.telegramId === ownerTgId);
+      if (user) return user;
     }
-    return owner;
+    return this.data.users[0];
   }
 
   // --- Users ---
@@ -526,20 +491,75 @@ class Database {
 
   // --- Settings ---
 
-  public getSettings(): SystemSettings {
-    const envToken = (process.env.TELEGRAM_BOT_TOKEN || '').trim();
-    if (envToken && (!this.data.settings.botToken || this.data.settings.botToken.trim() === '')) {
-      this.data.settings.botToken = envToken;
+  /**
+   * Sanitizes settings to ensure credentials are NEVER persisted to database or local disk.
+   * Runtime credentials must come ONLY from process.env.
+   */
+  public sanitizeSettings(input: any): SystemSettings {
+    if (!input || typeof input !== 'object') {
+      return { botUsername: process.env.TELEGRAM_BOT_USERNAME || 'TeleToXBot' };
     }
-    const envAdmin = (process.env.ADMIN_KEY || '').trim();
-    if (envAdmin && (!this.data.settings.adminSecret || this.data.settings.adminSecret.trim() === '')) {
-      this.data.settings.adminSecret = envAdmin;
+
+    // Explicit blacklist: never persist tokens, passwords, keys, secrets, or URIs
+    const FORBIDDEN_KEYS = new Set([
+      'botToken',
+      'adminSecret',
+      'TELEGRAM_BOT_TOKEN',
+      'ADMIN_KEY',
+      'TWITTER_CLIENT_SECRET',
+      'TWITTER_BEARER_TOKEN',
+      'TWITTER_CLIENT_ID',
+      'GEMINI_API_KEY',
+      'MONGODB_URI',
+      'MONGO_URI',
+      'MONGODB_URL',
+      'password',
+      'secret',
+      'token',
+      'key',
+      'apiKey',
+      'authToken',
+      'xCredentials',
+    ]);
+
+    const clean: Record<string, any> = {};
+    for (const [k, v] of Object.entries(input)) {
+      if (FORBIDDEN_KEYS.has(k)) continue;
+      const lower = k.toLowerCase();
+      if (
+        lower.includes('token') ||
+        lower.includes('secret') ||
+        lower.includes('password') ||
+        lower.includes('apikey') ||
+        lower.includes('bearer') ||
+        lower.includes('mongodb')
+      ) {
+        continue;
+      }
+      clean[k] = v;
     }
-    return this.data.settings;
+
+    const safeSettings: SystemSettings = {
+      botUsername:
+        typeof clean.botUsername === 'string' && clean.botUsername.trim().length > 0
+          ? clean.botUsername.trim()
+          : (this.data?.settings?.botUsername || process.env.TELEGRAM_BOT_USERNAME || 'TeleToXBot'),
+    };
+
+    if (typeof clean.lastUpdateId === 'number') {
+      safeSettings.lastUpdateId = clean.lastUpdateId;
+    }
+
+    return safeSettings;
   }
 
-  public updateSettings(patch: Partial<SystemSettings>): SystemSettings {
-    this.data.settings = { ...this.data.settings, ...patch };
+  public getSettings(): SystemSettings {
+    return this.sanitizeSettings(this.data.settings);
+  }
+
+  public updateSettings(patch: Partial<SystemSettings> | Record<string, any>): SystemSettings {
+    const sanitizedPatch = this.sanitizeSettings(patch);
+    this.data.settings = this.sanitizeSettings({ ...this.data.settings, ...sanitizedPatch });
     this.persistLocal();
 
     if (this.isMongoConnected && this.mongoDb) {

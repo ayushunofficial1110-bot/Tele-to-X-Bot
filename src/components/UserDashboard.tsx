@@ -18,6 +18,8 @@ import {
   Sliders,
   Check,
   Bot,
+  AlertCircle,
+  Info,
 } from 'lucide-react';
 import { BotUser, Automation, PostLog, UserSettings, OtherBot } from '../types.ts';
 
@@ -50,7 +52,11 @@ export const UserDashboard: React.FC<UserDashboardProps> = ({
   // Settings Form State
   const [settingsForm, setSettingsForm] = useState<UserSettings>(currentUser.settings);
   const [syncingAutoId, setSyncingAutoId] = useState<string | null>(null);
-  const [syncNotice, setSyncNotice] = useState<{ id: string; text: string } | null>(null);
+  const [syncNotice, setSyncNotice] = useState<{
+    id: string;
+    text: string;
+    type?: 'info' | 'warn' | 'success' | 'error';
+  } | null>(null);
   const [channelVerifyState, setChannelVerifyState] = useState<{
     status: 'idle' | 'checking' | 'success' | 'error';
     message?: string;
@@ -102,13 +108,19 @@ export const UserDashboard: React.FC<UserDashboardProps> = ({
         body: JSON.stringify({ userId: currentUser.id }),
       });
       const data = await res.json();
-      setSyncNotice({ id: auto.id, text: data.message || 'Sync completed.' });
+      const isWarn = data.isCreditsDepleted || !data.ok;
+      setSyncNotice({
+        id: auto.id,
+        text: data.message || data.error || 'Sync completed.',
+        type: data.isCreditsDepleted ? 'warn' : data.ok ? 'success' : 'error',
+      });
       onRefresh();
       fetchLogs();
-      setTimeout(() => setSyncNotice(null), 4000);
+      setTimeout(() => setSyncNotice(null), isWarn ? 8000 : 4000);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
-      setSyncNotice({ id: auto.id, text: `Sync failed: ${msg}` });
+      setSyncNotice({ id: auto.id, text: `Sync failed: ${msg}`, type: 'error' });
+      setTimeout(() => setSyncNotice(null), 6000);
     } finally {
       setSyncingAutoId(null);
     }
@@ -228,27 +240,6 @@ export const UserDashboard: React.FC<UserDashboardProps> = ({
       onRefresh();
     } catch (err) {
       console.error('Failed to delete automation:', err);
-    }
-  };
-
-  const handleTestAuto = async (auto: Automation) => {
-    try {
-      await fetch('/api/telegram/trigger-sample', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          automationId: auto.id,
-          userId: currentUser.id,
-          author: auto.source,
-          content: `Test publication from ${auto.source}: Real-time cross-posting pipeline verified with fact preservation.`,
-        }),
-      });
-      setTimeout(() => {
-        onRefresh();
-        fetchLogs();
-      }, 1500);
-    } catch (err) {
-      console.error('Failed to run test:', err);
     }
   };
 
@@ -480,14 +471,38 @@ export const UserDashboard: React.FC<UserDashboardProps> = ({
                 <div className="p-3 rounded-xl bg-slate-950/80 border border-slate-800 flex items-center justify-between text-xs">
                   <div className="truncate max-w-[42%]">
                     <span className="text-[10px] uppercase font-semibold text-slate-500 block">Source</span>
-                    <span className="font-mono text-white truncate block">{auto.source}</span>
+                    {auto.source.startsWith('http') ? (
+                      <a
+                        href={auto.source}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="font-mono text-sky-400 hover:underline truncate block"
+                        title={auto.source}
+                      >
+                        {auto.source}
+                      </a>
+                    ) : (
+                      <span className="font-mono text-white truncate block">{auto.source}</span>
+                    )}
                   </div>
 
                   <ArrowRight className="w-4 h-4 text-sky-400 flex-shrink-0" />
 
                   <div className="truncate max-w-[42%] text-right">
                     <span className="text-[10px] uppercase font-semibold text-slate-500 block">Destination</span>
-                    <span className="font-mono text-sky-300 truncate block">{auto.destination}</span>
+                    {auto.destination.startsWith('http') ? (
+                      <a
+                        href={auto.destination}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="font-mono text-sky-300 hover:underline truncate block"
+                        title={auto.destination}
+                      >
+                        {auto.destination}
+                      </a>
+                    ) : (
+                      <span className="font-mono text-sky-300 truncate block">{auto.destination}</span>
+                    )}
                   </div>
                 </div>
 
@@ -514,22 +529,43 @@ export const UserDashboard: React.FC<UserDashboardProps> = ({
                       <RefreshCw className={`w-2.5 h-2.5 ${syncingAutoId === auto.id ? 'animate-spin' : ''}`} />
                       <span>{syncingAutoId === auto.id ? 'Checking...' : 'Sync Now'}</span>
                     </button>
-                    <button
-                      onClick={() => handleTestAuto(auto)}
-                      className="flex items-center space-x-1 px-2.5 py-1 rounded bg-sky-600/10 hover:bg-sky-600/20 text-sky-300 border border-sky-500/20 font-medium transition"
-                      title="Send sample test post through AI pipeline and queue"
-                    >
-                      <Play className="w-2.5 h-2.5" />
-                      <span>Test Run</span>
-                    </button>
                   </div>
                 </div>
 
-                {syncNotice && syncNotice.id === auto.id && (
-                  <div className="p-2 rounded-lg bg-sky-950/60 border border-sky-800/80 text-[11px] text-sky-200">
-                    {syncNotice.text}
+                {syncNotice && syncNotice.id === auto.id ? (
+                  <div
+                    className={`p-2.5 rounded-lg border text-[11px] leading-relaxed ${
+                      syncNotice.type === 'warn'
+                        ? 'bg-amber-950/40 border-amber-800/60 text-amber-200'
+                        : syncNotice.type === 'error'
+                        ? 'bg-rose-950/40 border-rose-800/60 text-rose-200'
+                        : 'bg-emerald-950/40 border-emerald-800/60 text-emerald-200'
+                    }`}
+                  >
+                    <div className="flex items-start space-x-1.5">
+                      {syncNotice.type === 'warn' ? (
+                        <AlertCircle className="w-3.5 h-3.5 text-amber-400 flex-shrink-0 mt-0.5" />
+                      ) : syncNotice.type === 'error' ? (
+                        <AlertCircle className="w-3.5 h-3.5 text-rose-400 flex-shrink-0 mt-0.5" />
+                      ) : (
+                        <Check className="w-3.5 h-3.5 text-emerald-400 flex-shrink-0 mt-0.5" />
+                      )}
+                      <span>{syncNotice.text}</span>
+                    </div>
                   </div>
-                )}
+                ) : auto.lastError ? (
+                  <div className="p-2 rounded-lg bg-amber-950/20 border border-amber-800/40 text-[11px] text-amber-300/90 leading-relaxed">
+                    <div className="flex items-start space-x-1.5">
+                      <Info className="w-3.5 h-3.5 text-amber-400 flex-shrink-0 mt-0.5" />
+                      <div className="space-y-1">
+                        <p>{auto.lastError}</p>
+                        <p className="text-[10px] text-amber-400/70">
+                          Tip: Use <strong>Test Run</strong> to verify the AI rewriting &amp; Telegram queue pipeline immediately.
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+                ) : null}
 
                 <div className="flex justify-between items-center text-[10px] text-slate-500 pt-2 border-t border-slate-800/80">
                   <span>Processed: <strong className="text-slate-300">{auto.stats.processedCount}</strong></span>
@@ -813,7 +849,7 @@ export const UserDashboard: React.FC<UserDashboardProps> = ({
                 </label>
                 <input
                   type="text"
-                  placeholder={formDirection === 'x_to_telegram' ? '@OpenAI or @sama' : '@my_crypto_channel'}
+                  placeholder={formDirection === 'x_to_telegram' ? 'https://x.com/OpenAI or @OpenAI' : '@my_crypto_channel'}
                   value={formSource}
                   onChange={(e) => setFormSource(e.target.value)}
                   className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-sky-500 font-mono"
@@ -824,11 +860,11 @@ export const UserDashboard: React.FC<UserDashboardProps> = ({
               {/* Destination Input */}
               <div>
                 <label className="block text-xs font-semibold text-slate-300 mb-1">
-                  {formDirection === 'x_to_telegram' ? 'Destination Telegram Channel' : 'Destination Authorized X Handle'}
+                  {formDirection === 'x_to_telegram' ? 'Destination Telegram Channel' : 'Destination Authorized X Handle or URL'}
                 </label>
                 <input
                   type="text"
-                  placeholder={formDirection === 'x_to_telegram' ? '@my_channel or https://t.me/my_channel' : '@my_x_handle'}
+                  placeholder={formDirection === 'x_to_telegram' ? '@my_channel or https://t.me/my_channel' : 'https://x.com/my_handle or @my_handle'}
                   value={formDestination}
                   onChange={(e) => setFormDestination(e.target.value)}
                   className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-sky-500 font-mono"
@@ -987,7 +1023,7 @@ export const UserDashboard: React.FC<UserDashboardProps> = ({
                 </label>
                 <input
                   type="text"
-                  placeholder="@my_twitter_handle"
+                  placeholder="https://x.com/my_twitter_handle or @my_twitter_handle"
                   value={settingsForm.xCredentials.accountHandle || ''}
                   onChange={(e) =>
                     setSettingsForm({

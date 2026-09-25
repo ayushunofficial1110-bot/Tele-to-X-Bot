@@ -57,10 +57,10 @@ export const GuideModal: React.FC<GuideModalProps> = ({ isOpen, onClose }) => {
           <div className="p-4 rounded-2xl bg-slate-950 border border-slate-800 space-y-2">
             <div className="flex items-center space-x-2 text-sky-400 font-bold">
               <span className="w-5 h-5 rounded-full bg-sky-500/20 flex items-center justify-center text-[10px]">2</span>
-              <span>Configure Webhook in Admin Panel</span>
+              <span>Connect Bot in Admin Panel</span>
             </div>
             <p className="text-slate-300">
-              Navigate to the <strong className="text-white">Admin Panel</strong> tab. Paste your token and click <strong className="text-white">"Test Connection & Set Webhook"</strong>. The server automatically calls Telegram's <code className="bg-slate-900 px-1.5 py-0.5 rounded text-sky-300">setWebhook</code> API pointing to <code className="text-sky-300">/api/telegram/webhook</code>.
+              Navigate to the <strong className="text-white">Admin Panel</strong> tab. Provide your token and click <strong className="text-white">"Connect & Verify Bot"</strong>. The server verifies your bot credentials, ensures webhook mode is cleared, and activates real-time Telegram Long Polling.
             </p>
           </div>
 
@@ -98,7 +98,7 @@ export const GuideModal: React.FC<GuideModalProps> = ({ isOpen, onClose }) => {
               <span className="text-slate-400 font-semibold block text-[10px]">RENDER ENVIRONMENT VARIABLES:</span>
               <div className="grid grid-cols-1 gap-1 text-slate-300">
                 <div><code className="text-sky-300">NODE_ENV</code> = <code className="text-slate-200">production</code></div>
-                <div><code className="text-sky-300">APP_URL</code> = <code className="text-slate-200">https://your-service.onrender.com</code></div>
+                <div><code className="text-sky-300">APP_URL</code> = <code className="text-slate-200">https://tele-to-x-bot.onrender.com</code></div>
                 <div><code className="text-sky-300">TELEGRAM_BOT_TOKEN</code> = <code className="text-slate-200">Bot token from @BotFather</code></div>
                 <div><code className="text-sky-300">GEMINI_API_KEY</code> = <code className="text-slate-200">Google Gemini API Key</code></div>
                 <div><code className="text-sky-300">ADMIN_KEY</code> = <code className="text-slate-200">Your secret password for /admin</code></div>

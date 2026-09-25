@@ -1,9 +1,10 @@
 import crypto from 'node:crypto';
 import { db } from './db.ts';
 import { automationQueue } from './queue.ts';
-import { telegramClient, parseTelegramChannelInput } from './telegramClient.ts';
+import { telegramClient, parseTelegramChannelInput, isXUrl, formatXInput } from './telegramClient.ts';
 import { sourceMonitor } from './monitor.ts';
 import { BotUser, Automation, TelegramInlineButton } from '../src/types.ts';
+import { getTelegramButtonUrl } from './config.ts';
 
 export interface TelegramMessageResponse {
   text: string;
@@ -29,6 +30,7 @@ const GLOBAL_POLLING_LOCK_KEY = Symbol.for('x2telegram.telegramPollingLock');
 
 export class TelegramBotHandler {
   private isPolling = false;
+  private isStopping = false;
   private pollingLoopRunning = false;
   private runningLoopPromise: Promise<void> | null = null;
   private abortController: AbortController | null = null;
@@ -174,15 +176,23 @@ export class TelegramBotHandler {
 
   public startPolling() {
     const globalAny = globalThis as any;
+    const existingLock = globalAny[GLOBAL_POLLING_LOCK_KEY];
+
+    // Refuse to start while a previous loop is stopping
+    if (this.isStopping || existingLock?.isStopping) {
+      console.warn('[Telegram Bot] Cannot start polling: previous polling loop is currently stopping.');
+      return;
+    }
 
     // Startup guard: ensure only ONE polling worker can ever run per Node.js process
-    if (this.isPolling || this.pollingLoopRunning || globalAny[GLOBAL_POLLING_LOCK_KEY]) {
+    if (this.isPolling || this.pollingLoopRunning || existingLock) {
       return;
     }
 
     this.isPolling = true;
+    this.isStopping = false;
     const loopId = ++this.currentLoopId;
-    globalAny[GLOBAL_POLLING_LOCK_KEY] = { loopId, startedAt: Date.now() };
+    globalAny[GLOBAL_POLLING_LOCK_KEY] = { loopId, startedAt: Date.now(), isStopping: false };
 
     if (!this.hasLoggedStart) {
       this.hasLoggedStart = true;
@@ -196,11 +206,20 @@ export class TelegramBotHandler {
   }
 
   public async stopPolling(): Promise<void> {
-    this.isPolling = false;
     const globalAny = globalThis as any;
-    delete globalAny[GLOBAL_POLLING_LOCK_KEY];
 
-    // Abort active long-polling request immediately to free up Telegram connection
+    if (!this.isPolling && !this.pollingLoopRunning && !this.isStopping && !globalAny[GLOBAL_POLLING_LOCK_KEY]) {
+      return;
+    }
+
+    // 1. First set stopping state and signal active polling loop to terminate
+    this.isStopping = true;
+    this.isPolling = false;
+    if (globalAny[GLOBAL_POLLING_LOCK_KEY]) {
+      globalAny[GLOBAL_POLLING_LOCK_KEY].isStopping = true;
+    }
+
+    // 2. Abort active long-polling request immediately to unblock getUpdates HTTP connection
     if (this.abortController) {
       try {
         this.abortController.abort();
@@ -208,7 +227,7 @@ export class TelegramBotHandler {
       this.abortController = null;
     }
 
-    // Wait for running loop to finish if it's currently awaiting
+    // 3. Await the existing polling loop completion completely
     if (this.runningLoopPromise) {
       try {
         await this.runningLoopPromise;
@@ -217,7 +236,11 @@ export class TelegramBotHandler {
     }
 
     this.pollingLoopRunning = false;
-    console.log('[Telegram Bot] Polling worker stopped.');
+    this.isStopping = false;
+
+    // 4. Only AFTER the loop has fully exited, release the global polling lock
+    delete globalAny[GLOBAL_POLLING_LOCK_KEY];
+    console.log('[Telegram Bot] Polling worker stopped cleanly, global lock released.');
   }
 
   public wakeUpPolling(newToken?: string) {
@@ -226,11 +249,19 @@ export class TelegramBotHandler {
       this.lastUnauthorizedToken = '';
       this.consecutiveErrors = 0;
       this.consecutiveConflicts = 0;
+      this.webhookChecked = false;
     }
 
     const globalAny = globalThis as any;
+    const existingLock = globalAny[GLOBAL_POLLING_LOCK_KEY];
+
+    // Refuse to start if currently stopping
+    if (this.isStopping || existingLock?.isStopping) {
+      return;
+    }
+
     // Only initialize if not already running anywhere in this Node process
-    if (!this.isPolling && !this.pollingLoopRunning && !globalAny[GLOBAL_POLLING_LOCK_KEY]) {
+    if (!this.isPolling && !this.pollingLoopRunning && !existingLock) {
       this.startPolling();
     }
   }
@@ -241,9 +272,23 @@ export class TelegramBotHandler {
       isPolling: this.isPolling,
       isTokenUnauthorized: this.isTokenUnauthorized,
       hasToken: Boolean(activeToken && activeToken.length > 10),
-      tokenMasked: activeToken && activeToken.length > 8 ? `${activeToken.slice(0, 5)}...${activeToken.slice(-4)}` : '',
       lastUpdateId: this.lastUpdateId,
     };
+  }
+
+  private cancellableDelay(ms: number): Promise<void> {
+    if (this.isStopping || !this.isPolling) return Promise.resolve();
+    return new Promise((resolve) => {
+      const timer = setTimeout(resolve, ms);
+      const checkInterval = setInterval(() => {
+        if (this.isStopping || !this.isPolling) {
+          clearTimeout(timer);
+          clearInterval(checkInterval);
+          resolve();
+        }
+      }, 100);
+      timer.unref?.();
+    });
   }
 
   private async runPollingLoop(loopId: number): Promise<void> {
@@ -253,10 +298,10 @@ export class TelegramBotHandler {
     this.pollingLoopRunning = true;
 
     this.runningLoopPromise = (async () => {
-      while (this.isPolling && this.currentLoopId === loopId) {
+      while (this.isPolling && !this.isStopping && this.currentLoopId === loopId) {
         const token = telegramClient.getActiveToken();
         if (!token || token.length < 10) {
-          await new Promise((r) => setTimeout(r, 5000));
+          await this.cancellableDelay(5000);
           continue;
         }
 
@@ -271,7 +316,7 @@ export class TelegramBotHandler {
 
         // If this token was identified as unauthorized (401), pause polling until updated
         if (this.isTokenUnauthorized && token === this.lastUnauthorizedToken) {
-          await new Promise((r) => setTimeout(r, 15000));
+          await this.cancellableDelay(15000);
           continue;
         }
 
@@ -290,6 +335,15 @@ export class TelegramBotHandler {
                 `[Telegram Bot] Webhook status verified: clean. Pending updates: ${webhookInfo?.pending_update_count ?? 0}.`
               );
             }
+
+            // Verify bot connection via getMe
+            const me = await telegramClient.getMe(token);
+            if (me && me.username) {
+              console.log(`[Telegram Bot] 🤖 Successfully connected to Telegram Bot API: @${me.username} (ID: ${me.id})`);
+              db.updateSettings({ botUsername: me.username });
+              db.logSystem('success', 'telegram_bot', `Connected to Telegram Bot: @${me.username}`);
+            }
+
             this.webhookChecked = true;
           } catch (err: unknown) {
             const msg = err instanceof Error ? err.message : String(err);
@@ -298,7 +352,7 @@ export class TelegramBotHandler {
           }
         }
 
-        if (!this.isPolling || this.currentLoopId !== loopId) break;
+        if (!this.isPolling || this.isStopping || this.currentLoopId !== loopId) break;
 
         try {
           const payload: any = {
@@ -327,6 +381,14 @@ export class TelegramBotHandler {
               body: JSON.stringify(payload),
               signal: currentController.signal,
             });
+          } catch (fetchErr: any) {
+            if (fetchErr?.name === 'AbortError' || currentController.signal.aborted) {
+              if (this.isStopping || !this.isPolling) {
+                break;
+              }
+              continue;
+            }
+            throw fetchErr;
           } finally {
             clearTimeout(timeoutId);
             if (this.abortController === currentController) {
@@ -334,7 +396,7 @@ export class TelegramBotHandler {
             }
           }
 
-          if (!this.isPolling || this.currentLoopId !== loopId) break;
+          if (!this.isPolling || this.isStopping || this.currentLoopId !== loopId) break;
 
           if (!res.ok) {
             const status = res.status;
@@ -355,7 +417,7 @@ export class TelegramBotHandler {
                 'telegram_bot',
                 'Configured Telegram Bot Token returned HTTP 401 Unauthorized. Polling paused until a valid token is provided.'
               );
-              await new Promise((r) => setTimeout(r, 15000));
+              await this.cancellableDelay(15000);
               continue;
             }
 
@@ -380,21 +442,22 @@ export class TelegramBotHandler {
                 `[Telegram Bot] ⚠️ Conflict (409): ${desc || 'Webhook active or duplicate getUpdates'}. Waiting ${backoffSec}s before retrying (conflict #${this.consecutiveConflicts})...`
               );
 
-              await new Promise((r) => setTimeout(r, delayMs));
+              if (!this.isPolling || this.isStopping || this.currentLoopId !== loopId) break;
+              await this.cancellableDelay(delayMs);
               continue;
             }
 
             if (status === 429) {
               const retryAfter = json?.parameters?.retry_after || 5;
               console.warn(`[Telegram Bot] ⚠️ Rate limited (429). Telegram requested waiting ${retryAfter}s.`);
-              await new Promise((r) => setTimeout(r, retryAfter * 1000));
+              await this.cancellableDelay(retryAfter * 1000);
               continue;
             }
 
             console.warn(`[Telegram Bot] Notice: Telegram getUpdates returned status [${status}]: ${json?.description || text}`);
             this.consecutiveErrors++;
             const backoff = Math.min(15000, 2000 * Math.pow(1.5, this.consecutiveErrors));
-            await new Promise((r) => setTimeout(r, backoff));
+            await this.cancellableDelay(backoff);
             continue;
           }
 
@@ -408,7 +471,7 @@ export class TelegramBotHandler {
             if (updates.length > 0) {
               console.log(`[Telegram Bot] 📥 Received ${updates.length} update(s) from Telegram.`);
               for (const update of updates) {
-                if (!this.isPolling || this.currentLoopId !== loopId) break;
+                if (!this.isPolling || this.isStopping || this.currentLoopId !== loopId) break;
 
                 const uId = update.update_id;
                 let updateType = 'unknown';
@@ -433,7 +496,7 @@ export class TelegramBotHandler {
                   senderInfo = `chat_id=${update.my_chat_member.chat?.id}`;
                 }
 
-                // Requirement 7: log update_id when an update is actually received
+                // Log update_id when an update is actually received
                 console.log(`[Telegram Bot] ⚡ Processing update_id=${uId} [type: ${updateType}] from ${senderInfo}`);
 
                 // Advance highest seen update ID so next request confirms this update to Telegram
@@ -452,11 +515,11 @@ export class TelegramBotHandler {
           // Loop immediately for real-time responsiveness
           await new Promise((r) => setTimeout(r, 100));
         } catch (err: unknown) {
-          if (!this.isPolling || this.currentLoopId !== loopId) break;
+          if (!this.isPolling || this.isStopping || this.currentLoopId !== loopId) break;
 
           const error = err as any;
           if (error?.name === 'AbortError') {
-            // Timeout on fetch - standard completion of a 25s long poll when no updates occurred
+            if (this.isStopping || !this.isPolling) break;
             continue;
           }
 
@@ -470,7 +533,8 @@ export class TelegramBotHandler {
 
       this.pollingLoopRunning = false;
       const globalAny = globalThis as any;
-      if (globalAny[GLOBAL_POLLING_LOCK_KEY]?.loopId === loopId) {
+      // If loop exited without stopPolling() active, release the lock
+      if (!this.isStopping && globalAny[GLOBAL_POLLING_LOCK_KEY]?.loopId === loopId) {
         delete globalAny[GLOBAL_POLLING_LOCK_KEY];
       }
     })();
@@ -531,6 +595,60 @@ export class TelegramBotHandler {
       return this.getHelpMenu();
     }
 
+    // Direct X (Twitter) URL provided by user (profile or post)
+    if (isXUrl(text)) {
+      const xUrl = formatXInput(text);
+      userWizards.set(user.id, {
+        step: 'destination',
+        direction: 'x_to_telegram',
+        source: xUrl,
+      });
+      return {
+        text: `🔗 **X (Twitter) Link Received:**\n${xUrl}\n\n📢 **Step 2 of 2: Where should new posts from this X link be published in Telegram?**\n\n1️⃣ Add this bot as an **Administrator** in your Telegram channel with *Post Messages* permission.\n2️⃣ Send your channel username or link below (for example: \`@my_channel\` or \`https://t.me/my_channel\`):`,
+        replyMarkup: {
+          inline_keyboard: [[{ text: '« Cancel', callback_data: 'main_menu' }]],
+        },
+      };
+    }
+
+    // User asks for Twitter / X link
+    const cleanLower = text.toLowerCase().trim();
+    if (
+      cleanLower === '/x' ||
+      cleanLower === '/twitter' ||
+      cleanLower === '/link' ||
+      cleanLower === 'x link' ||
+      cleanLower === 'twitter link' ||
+      cleanLower.includes('twitter link') ||
+      cleanLower.includes('x link') ||
+      cleanLower.includes('twitter url') ||
+      cleanLower.includes('x url')
+    ) {
+      const handle = user.settings.xCredentials?.accountHandle;
+      if (handle) {
+        const xLink = handle.startsWith('http') ? handle : `https://x.com/${handle.replace(/^@/, '')}`;
+        return {
+          text: `🔗 **Your Connected X (Twitter) Link:**\n${xLink}\n\nThis account is authorized for cross-posting with your Telegram channels.`,
+          replyMarkup: {
+            inline_keyboard: [
+              [{ text: '🌐 View on X', url: xLink }],
+              [{ text: '« Main Menu', callback_data: 'main_menu' }],
+            ],
+          },
+        };
+      } else {
+        return {
+          text: `🔗 **X (Twitter) Link:**\n\nYou have not connected an X account yet. Authorize your account below with 1 click:`,
+          replyMarkup: {
+            inline_keyboard: [
+              [{ text: '🔗 Connect X Account', url: getTelegramButtonUrl(`/api/auth/x/login?userId=${user.id}`) }],
+              [{ text: '« Main Menu', callback_data: 'main_menu' }],
+            ],
+          },
+        };
+      }
+    }
+
     return {
       text: `👋 Hello ${user.firstName}! Use the buttons below or send /start anytime to manage your cross-posting:`,
       replyMarkup: {
@@ -541,7 +659,7 @@ export class TelegramBotHandler {
           ],
           [
             { text: '⚙️ Settings', callback_data: 'settings_view' },
-            { text: '🌐 Web Dashboard', url: `${process.env.APP_URL || 'http://localhost:3000'}/?auth_token=${user.authToken}` },
+            { text: '🌐 Web Dashboard', url: getTelegramButtonUrl(`/?auth_token=${user.authToken}`) },
           ],
         ],
       },
@@ -608,7 +726,7 @@ export class TelegramBotHandler {
       const wizard: WizardState = { step: 'source', direction: 'x_to_telegram' };
       userWizards.set(user.id, wizard);
       return {
-        text: `🐦 **Step 1 of 2: Which X (Twitter) account do you want to monitor?**\n\nPlease type the X username in the chat below (for example: \`@OpenAI\` or \`@sama\`):\n\n*(No password or API key is required)*`,
+        text: `🐦 **Step 1 of 2: Which X (Twitter) account do you want to monitor?**\n\nPlease send the X profile/post URL or handle in the chat below (for example: \`https://x.com/OpenAI\` or \`@OpenAI\`):\n\n*(No password or API key is required)*`,
         replyMarkup: {
           inline_keyboard: [[{ text: '« Cancel', callback_data: 'main_menu' }]],
         },
@@ -617,8 +735,7 @@ export class TelegramBotHandler {
 
     if (data === 'wiz_dir_tg2x') {
       const isConnected = Boolean(user.settings.xCredentials?.oauth2AccessToken);
-      const appUrl = process.env.APP_URL || 'http://localhost:3000';
-      const oauthUrl = `${appUrl}/api/auth/x/login?userId=${user.id}`;
+      const oauthUrl = getTelegramButtonUrl(`/api/auth/x/login?userId=${user.id}`);
 
       if (!isConnected) {
         return {
@@ -689,10 +806,21 @@ export class TelegramBotHandler {
 
     if (wizard.step === 'source') {
       if (wizard.direction === 'x_to_telegram') {
+        // If user provided an X/Twitter URL (profile or post URL), preserve it exactly as a clickable URL
+        if (isXUrl(cleanInput)) {
+          const xUrl = formatXInput(cleanInput);
+          wizard.source = xUrl;
+          wizard.step = 'destination';
+          return {
+            text: `✅ Source set to: ${xUrl}\n\n📢 **Step 2 of 2: Where should new posts be published in Telegram?**\n\n1️⃣ Add this bot as an **Administrator** in your Telegram channel with *Post Messages* permission.\n2️⃣ Send your channel username or link below (for example: \`@my_channel\` or \`https://t.me/my_channel\`):`,
+            replyMarkup: { inline_keyboard: [[{ text: '« Cancel', callback_data: 'main_menu' }]] },
+          };
+        }
+
         const handle = cleanInput.startsWith('@') ? cleanInput : `@${cleanInput}`;
         if (!/^@[a-zA-Z0-9_]{1,25}$/.test(handle)) {
           return {
-            text: `⚠️ Please enter a valid X handle (for example: \`@OpenAI\` or \`@sama\`):`,
+            text: `⚠️ Please enter a valid X (Twitter) URL (e.g. \`https://x.com/OpenAI\`) or handle (\`@OpenAI\`):`,
             replyMarkup: { inline_keyboard: [[{ text: '« Cancel', callback_data: 'main_menu' }]] },
           };
         }
@@ -714,8 +842,11 @@ export class TelegramBotHandler {
         wizard.source = parsed.canonical;
         wizard.step = 'destination';
 
-        const userXHandle = user.settings.xCredentials?.accountHandle || user.telegramUsername;
-        wizard.destination = userXHandle;
+        const userXHandle = user.settings.xCredentials?.accountHandle;
+        const destination = userXHandle
+          ? (userXHandle.startsWith('http') ? userXHandle : `https://x.com/${userXHandle.replace(/^@/, '')}`)
+          : (user.telegramUsername ? `https://x.com/${user.telegramUsername.replace(/^@/, '')}` : 'https://x.com');
+        wizard.destination = destination;
 
         return this.finishWizard(user, wizard);
       }
@@ -733,7 +864,8 @@ export class TelegramBotHandler {
         }
         destination = parsed.canonical;
       } else {
-        destination = cleanInput.startsWith('@') ? cleanInput : `@${cleanInput}`;
+        // Destination is X: preserve URL as clickable URL or format handle without prepending @ to URLs
+        destination = formatXInput(cleanInput);
       }
 
       wizard.destination = destination;
@@ -782,7 +914,7 @@ export class TelegramBotHandler {
         inline_keyboard: [
           [{ text: '⚡ View My Bridges', callback_data: 'view_automations' }],
           [{ text: '➕ Set Up Another Bridge', callback_data: 'new_automation_start' }],
-          [{ text: '🌐 Open Web Dashboard', url: `${process.env.APP_URL || 'http://localhost:3000'}/?auth_token=${user.authToken}` }],
+          [{ text: '🌐 Open Web Dashboard', url: getTelegramButtonUrl(`/?auth_token=${user.authToken}`) }],
           [{ text: '« Main Menu', callback_data: 'main_menu' }],
         ],
       },
@@ -792,8 +924,7 @@ export class TelegramBotHandler {
   private getMainMenu(user: BotUser): TelegramMessageResponse {
     const automations = db.getAutomations(user.id);
     const activeCount = automations.filter((a) => a.status === 'active').length;
-    const appUrl = process.env.APP_URL || 'http://localhost:3000';
-    const webLoginUrl = `${appUrl}/?auth_token=${user.authToken}`;
+    const webLoginUrl = getTelegramButtonUrl(`/?auth_token=${user.authToken}`);
 
     // If new user with 0 automations, present the guided welcome onboarding
     if (automations.length === 0) {
@@ -893,17 +1024,18 @@ export class TelegramBotHandler {
 
   private getConnectXMenu(user: BotUser): TelegramMessageResponse {
     const isConnected = Boolean(user.settings.xCredentials?.oauth2AccessToken);
-    const appUrl = process.env.APP_URL || 'http://localhost:3000';
-    const oauthUrl = `${appUrl}/api/auth/x/login?userId=${user.id}`;
+    const oauthUrl = getTelegramButtonUrl(`/api/auth/x/login?userId=${user.id}`);
     const handle = user.settings.xCredentials?.accountHandle;
 
     let text = `🔗 **Connect Your X (Twitter) Account**\n\n`;
     if (isConnected) {
-      text += `✅ Your X account is **Connected via OAuth 2.0 PKCE**${handle ? ` (${handle})` : ''}.\n\nYou are authorized to post from Telegram to X. No passwords or API keys are stored on our servers.`;
+      const xUrl = handle ? (handle.startsWith('http') ? handle : `https://x.com/${handle.replace(/^@/, '')}`) : '';
+      text += `✅ Your X account is **Connected via OAuth 2.0 PKCE**${xUrl ? `:\n🔗 ${xUrl}` : ''}.\n\nYou are authorized to post from Telegram to X. No passwords or API keys are stored on our servers.`;
       return {
         text,
         replyMarkup: {
           inline_keyboard: [
+            ...(xUrl ? [[{ text: '🌐 Open X Profile', url: xUrl }]] : []),
             [{ text: '⚡ View My Bridges', callback_data: 'view_automations' }],
             [{ text: '« Main Menu', callback_data: 'main_menu' }],
           ],
