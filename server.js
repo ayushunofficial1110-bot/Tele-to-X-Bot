@@ -1699,6 +1699,47 @@ var AutomationQueue = class {
 };
 var automationQueue = new AutomationQueue();
 
+// server/config.ts
+var PRODUCTION_APP_URL = "https://tele-to-x-bot.onrender.com";
+function getAppUrl() {
+  const envUrl = process.env.APP_URL?.trim();
+  if (envUrl && envUrl.length > 0) {
+    const cleanUrl = envUrl.replace(/\/+$/, "");
+    if (process.env.NODE_ENV === "production" && (cleanUrl.includes("localhost") || cleanUrl.includes("127.0.0.1"))) {
+      return PRODUCTION_APP_URL;
+    }
+    return cleanUrl;
+  }
+  return PRODUCTION_APP_URL;
+}
+function isAiStudioEnvironment() {
+  if (process.env.DISABLE_TELEGRAM_POLLING === "true") return true;
+  if (process.env.ENABLE_TELEGRAM_POLLING === "false") return true;
+  if (process.env.FORCE_RUN_BOT === "true" || process.env.RUN_BOT_IN_DEV === "true") return false;
+  if (process.env.K_SERVICE && (process.env.K_SERVICE.includes("ais-") || process.env.K_SERVICE.includes("ais-dev"))) {
+    return true;
+  }
+  const appUrl = (process.env.APP_URL || "").toLowerCase();
+  if (appUrl.includes("ais-dev") || appUrl.includes("ais-pre")) {
+    return true;
+  }
+  if (process.env.RENDER === "true") {
+    return false;
+  }
+  if (process.env.NODE_ENV === "development" || !process.env.NODE_ENV) {
+    return true;
+  }
+  return false;
+}
+function getTelegramButtonUrl(pathWithQuery = "") {
+  const base = getAppUrl();
+  const normalizedPath = pathWithQuery.startsWith("/") ? pathWithQuery : `/${pathWithQuery}`;
+  if (base.includes("localhost") || base.includes("127.0.0.1")) {
+    return `${PRODUCTION_APP_URL}${normalizedPath}`;
+  }
+  return `${base}${normalizedPath}`;
+}
+
 // server/monitor.ts
 var SourceMonitor = class {
   constructor() {
@@ -1708,12 +1749,17 @@ var SourceMonitor = class {
     // Poll every 60 seconds
     // Tracks cooldowns per automation (e.g. rate limit, credits depleted) to prevent rapid error loops
     this.pollCooldowns = /* @__PURE__ */ new Map();
-    this.start();
+    if (!isAiStudioEnvironment()) {
+      this.start();
+    }
   }
   resetCooldown(autoId) {
     this.pollCooldowns.delete(autoId);
   }
   start() {
+    if (isAiStudioEnvironment()) {
+      return;
+    }
     if (this.timer) clearInterval(this.timer);
     this.timer = setInterval(() => {
       this.checkSources();
@@ -1861,28 +1907,6 @@ var SourceMonitor = class {
 };
 var sourceMonitor = new SourceMonitor();
 
-// server/config.ts
-var PRODUCTION_APP_URL = "https://tele-to-x-bot.onrender.com";
-function getAppUrl() {
-  const envUrl = process.env.APP_URL?.trim();
-  if (envUrl && envUrl.length > 0) {
-    const cleanUrl = envUrl.replace(/\/+$/, "");
-    if (process.env.NODE_ENV === "production" && (cleanUrl.includes("localhost") || cleanUrl.includes("127.0.0.1"))) {
-      return PRODUCTION_APP_URL;
-    }
-    return cleanUrl;
-  }
-  return PRODUCTION_APP_URL;
-}
-function getTelegramButtonUrl(pathWithQuery = "") {
-  const base = getAppUrl();
-  const normalizedPath = pathWithQuery.startsWith("/") ? pathWithQuery : `/${pathWithQuery}`;
-  if (base.includes("localhost") || base.includes("127.0.0.1")) {
-    return `${PRODUCTION_APP_URL}${normalizedPath}`;
-  }
-  return `${base}${normalizedPath}`;
-}
-
 // server/telegramBot.ts
 var userWizards = /* @__PURE__ */ new Map();
 var GLOBAL_BOT_HANDLER_KEY = Symbol.for("x2telegram.telegramBotSingleton");
@@ -1997,6 +2021,20 @@ var TelegramBotHandler = class {
     return response;
   }
   startPolling() {
+    if (isAiStudioEnvironment()) {
+      if (!this.hasLoggedStart) {
+        this.hasLoggedStart = true;
+        console.log(
+          "[Telegram Bot] \u23F8\uFE0F Telegram Bot polling is STOPPED in AI Gemini Studio / Dev environment to prevent 409 conflict with Render production."
+        );
+        db.logSystem(
+          "info",
+          "telegram_bot",
+          "Telegram Bot polling is stopped in AI Gemini Studio to prevent 409 conflict with Render production."
+        );
+      }
+      return;
+    }
     const globalAny = globalThis;
     const existingLock = globalAny[GLOBAL_POLLING_LOCK_KEY];
     if (this.isStopping || existingLock?.isStopping) {
@@ -2049,6 +2087,9 @@ var TelegramBotHandler = class {
     console.log("[Telegram Bot] Polling worker stopped cleanly, global lock released.");
   }
   wakeUpPolling(newToken) {
+    if (isAiStudioEnvironment()) {
+      return;
+    }
     if (newToken) {
       this.isTokenUnauthorized = false;
       this.lastUnauthorizedToken = "";
@@ -2067,8 +2108,10 @@ var TelegramBotHandler = class {
   }
   getBotStatus() {
     const activeToken = telegramClient.getActiveToken();
+    const inAiStudio = isAiStudioEnvironment();
     return {
-      isPolling: this.isPolling,
+      isPolling: this.isPolling && !inAiStudio,
+      isAiStudio: inAiStudio,
       isTokenUnauthorized: this.isTokenUnauthorized,
       hasToken: Boolean(activeToken && activeToken.length > 10),
       lastUpdateId: this.lastUpdateId
@@ -3435,6 +3478,7 @@ async function startServer() {
       hasTwitterCreds: Boolean(process.env.TWITTER_CLIENT_ID && process.env.TWITTER_CLIENT_SECRET),
       isTokenUnauthorized: botStatus.isTokenUnauthorized,
       isPolling: botStatus.isPolling,
+      isAiStudio: botStatus.isAiStudio,
       lastUpdateId: botStatus.lastUpdateId
     };
     res.json({ ok: true, settings: safeSettings });
@@ -3491,7 +3535,9 @@ async function startServer() {
       if (meJson.result?.username) {
         db.updateSettings({ botUsername: meJson.result.username });
       }
-      telegramBot.wakeUpPolling();
+      if (!isAiStudioEnvironment()) {
+        telegramBot.wakeUpPolling();
+      }
       res.json({
         ok: true,
         botInfo: meJson.result,
@@ -3520,8 +3566,14 @@ async function startServer() {
   }
   const server = app.listen(PORT, "0.0.0.0", () => {
     console.log(`[X2Telegram Server] Running on http://0.0.0.0:${PORT}`);
-    sourceMonitor.start();
-    telegramBot.startPolling();
+    if (!isAiStudioEnvironment()) {
+      sourceMonitor.start();
+      telegramBot.startPolling();
+    } else {
+      console.log(
+        "[X2Telegram Server] \u23F8\uFE0F Running in AI Gemini Studio mode: Web UI & Admin Panel active. Telegram Bot polling is STOPPED to prevent 409 conflict with Render production."
+      );
+    }
   });
   const gracefulShutdown = async (signal) => {
     console.log(`[X2Telegram Server] Received ${signal}. Stopping background workers...`);

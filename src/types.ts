@@ -157,6 +157,7 @@ export interface SystemSettings {
   hasTwitterCreds?: boolean;
   isTokenUnauthorized?: boolean;
   isPolling?: boolean;
+  isAiStudio?: boolean;
   lastUpdateId?: number;
 }
 

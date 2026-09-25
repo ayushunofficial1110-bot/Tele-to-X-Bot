@@ -49,6 +49,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = () => {
   const [isTestingTelegram, setIsTestingTelegram] = useState(false);
   const [telegramStatus, setTelegramStatus] = useState<any>(null);
   const [isTokenUnauthorized, setIsTokenUnauthorized] = useState(false);
+  const [isAiStudio, setIsAiStudio] = useState(false);
 
   // Other Bot Modal
   const [showBotModal, setShowBotModal] = useState(false);
@@ -159,6 +160,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = () => {
         setHasTelegramToken(Boolean(data.settings.hasTelegramToken));
         setConfiguredBotUsername(data.settings.botUsername || '');
         setIsTokenUnauthorized(Boolean(data.settings.isTokenUnauthorized));
+        setIsAiStudio(Boolean(data.settings.isAiStudio));
       }
     } catch (err) {
       console.error('Failed to fetch settings:', err);
@@ -638,6 +640,11 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = () => {
               <AlertTriangle className="w-3 h-3" />
               <span>Token Unauthorized (401)</span>
             </span>
+          ) : isAiStudio ? (
+            <span className="inline-flex items-center space-x-1 px-2.5 py-1 rounded-full text-[11px] font-semibold bg-amber-500/15 text-amber-400 border border-amber-500/30">
+              <CheckCircle2 className="w-3 h-3" />
+              <span>AI Studio Mode (Polling Stopped to Protect Render)</span>
+            </span>
           ) : hasTelegramToken ? (
             <span className="inline-flex items-center space-x-1 px-2.5 py-1 rounded-full text-[11px] font-semibold bg-emerald-500/15 text-emerald-400 border border-emerald-500/30">
               <CheckCircle2 className="w-3 h-3" />
@@ -650,6 +657,15 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = () => {
             </span>
           )}
         </div>
+
+        {isAiStudio && (
+          <div className="mb-4 p-3.5 rounded-2xl bg-sky-500/10 border border-sky-500/20 text-sky-300 text-xs flex items-start space-x-2.5">
+            <CheckCircle2 className="w-4 h-4 text-sky-400 shrink-0 mt-0.5" />
+            <div>
+              <span className="font-bold">AI Gemini Studio Safe Mode:</span> Telegram bot long-polling is intentionally stopped in this preview environment to prevent 409 conflict errors with your live bot running on Render. Your live production bot runs 24/7 on Render without interruptions.
+            </div>
+          </div>
+        )}
 
         {isTokenUnauthorized && (
           <div className="mb-4 p-3.5 rounded-2xl bg-rose-500/10 border border-rose-500/20 text-rose-300 text-xs flex items-start space-x-2.5">
@@ -669,7 +685,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = () => {
               </span>
             </div>
             <p className="text-[11px] text-slate-500">
-              Operating mode: <span className="text-emerald-400 font-semibold">Long Polling Only</span> (zero webhooks, self-contained single-process worker).
+              Operating mode: <span className="text-emerald-400 font-semibold">{isAiStudio ? 'Stopped in AI Studio (Active on Render)' : 'Long Polling Only'}</span> (zero webhooks, self-contained single-process worker).
             </p>
           </div>
 

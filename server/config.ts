@@ -28,6 +28,40 @@ export function getAppUrl(): string {
 }
 
 /**
+ * Detects whether the current process is running inside Google AI Studio / local preview environment.
+ * Used to stop Telegram Bot polling in AI Studio so it does not conflict (409) with
+ * the live production instance running on Render.
+ */
+export function isAiStudioEnvironment(): boolean {
+  if (process.env.DISABLE_TELEGRAM_POLLING === 'true') return true;
+  if (process.env.ENABLE_TELEGRAM_POLLING === 'false') return true;
+  if (process.env.FORCE_RUN_BOT === 'true' || process.env.RUN_BOT_IN_DEV === 'true') return false;
+
+  // Cloud Run / AI Studio container marker
+  if (process.env.K_SERVICE && (process.env.K_SERVICE.includes('ais-') || process.env.K_SERVICE.includes('ais-dev'))) {
+    return true;
+  }
+
+  // App URL marker for AI Studio preview / dev URL
+  const appUrl = (process.env.APP_URL || '').toLowerCase();
+  if (appUrl.includes('ais-dev') || appUrl.includes('ais-pre')) {
+    return true;
+  }
+
+  // If running on Render, it is production
+  if (process.env.RENDER === 'true') {
+    return false;
+  }
+
+  // If in development mode (not production)
+  if (process.env.NODE_ENV === 'development' || !process.env.NODE_ENV) {
+    return true;
+  }
+
+  return false;
+}
+
+/**
  * Returns a valid URL for Telegram inline keyboard buttons.
  * Telegram API strictly rejects 'localhost' and '127.0.0.1' with:
  * "Bad Request: inline keyboard button URL '...' is invalid: Wrong HTTP URL"

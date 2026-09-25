@@ -4,7 +4,7 @@ import { automationQueue } from './queue.ts';
 import { telegramClient, parseTelegramChannelInput, isXUrl, formatXInput } from './telegramClient.ts';
 import { sourceMonitor } from './monitor.ts';
 import { BotUser, Automation, TelegramInlineButton } from '../src/types.ts';
-import { getTelegramButtonUrl } from './config.ts';
+import { getTelegramButtonUrl, isAiStudioEnvironment } from './config.ts';
 
 export interface TelegramMessageResponse {
   text: string;
@@ -175,6 +175,22 @@ export class TelegramBotHandler {
   }
 
   public startPolling() {
+    // If running in AI Gemini Studio or local preview, stop polling to avoid 409 Conflict with Render production
+    if (isAiStudioEnvironment()) {
+      if (!this.hasLoggedStart) {
+        this.hasLoggedStart = true;
+        console.log(
+          '[Telegram Bot] ⏸️ Telegram Bot polling is STOPPED in AI Gemini Studio / Dev environment to prevent 409 conflict with Render production.'
+        );
+        db.logSystem(
+          'info',
+          'telegram_bot',
+          'Telegram Bot polling is stopped in AI Gemini Studio to prevent 409 conflict with Render production.'
+        );
+      }
+      return;
+    }
+
     const globalAny = globalThis as any;
     const existingLock = globalAny[GLOBAL_POLLING_LOCK_KEY];
 
@@ -244,6 +260,10 @@ export class TelegramBotHandler {
   }
 
   public wakeUpPolling(newToken?: string) {
+    if (isAiStudioEnvironment()) {
+      return;
+    }
+
     if (newToken) {
       this.isTokenUnauthorized = false;
       this.lastUnauthorizedToken = '';
@@ -268,8 +288,10 @@ export class TelegramBotHandler {
 
   public getBotStatus() {
     const activeToken = telegramClient.getActiveToken();
+    const inAiStudio = isAiStudioEnvironment();
     return {
-      isPolling: this.isPolling,
+      isPolling: this.isPolling && !inAiStudio,
+      isAiStudio: inAiStudio,
       isTokenUnauthorized: this.isTokenUnauthorized,
       hasToken: Boolean(activeToken && activeToken.length > 10),
       lastUpdateId: this.lastUpdateId,

@@ -8,7 +8,7 @@ import { xClient } from './server/xClient.ts';
 import { sourceMonitor } from './server/monitor.ts';
 import { automationQueue } from './server/queue.ts';
 import { detectAdOrPromotion, rewriteSocialPost } from './server/gemini.ts';
-import { getAppUrl } from './server/config.ts';
+import { getAppUrl, isAiStudioEnvironment } from './server/config.ts';
 
 const PORT = Number(process.env.PORT) || 3000;
 
@@ -610,6 +610,7 @@ async function startServer() {
       hasTwitterCreds: Boolean(process.env.TWITTER_CLIENT_ID && process.env.TWITTER_CLIENT_SECRET),
       isTokenUnauthorized: botStatus.isTokenUnauthorized,
       isPolling: botStatus.isPolling,
+      isAiStudio: botStatus.isAiStudio,
       lastUpdateId: botStatus.lastUpdateId,
     };
     res.json({ ok: true, settings: safeSettings });
@@ -675,8 +676,10 @@ async function startServer() {
         db.updateSettings({ botUsername: meJson.result.username });
       }
 
-      // Wake up bot polling with active token
-      telegramBot.wakeUpPolling();
+      // Wake up bot polling with active token only if not running in AI Studio
+      if (!isAiStudioEnvironment()) {
+        telegramBot.wakeUpPolling();
+      }
 
       res.json({
         ok: true,
@@ -710,8 +713,14 @@ async function startServer() {
 
   const server = app.listen(PORT, '0.0.0.0', () => {
     console.log(`[X2Telegram Server] Running on http://0.0.0.0:${PORT}`);
-    sourceMonitor.start();
-    telegramBot.startPolling();
+    if (!isAiStudioEnvironment()) {
+      sourceMonitor.start();
+      telegramBot.startPolling();
+    } else {
+      console.log(
+        '[X2Telegram Server] ⏸️ Running in AI Gemini Studio mode: Web UI & Admin Panel active. Telegram Bot polling is STOPPED to prevent 409 conflict with Render production.'
+      );
+    }
   });
 
   // Graceful shutdown handling to clean up Telegram polling connection and avoid 409 conflict on restarts

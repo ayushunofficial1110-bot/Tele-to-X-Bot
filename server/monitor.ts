@@ -2,6 +2,7 @@ import { db } from './db.ts';
 import { xClient } from './xClient.ts';
 import { automationQueue } from './queue.ts';
 import { Automation } from '../src/types.ts';
+import { isAiStudioEnvironment } from './config.ts';
 
 export class SourceMonitor {
   private timer: NodeJS.Timeout | null = null;
@@ -11,7 +12,10 @@ export class SourceMonitor {
   private pollCooldowns: Map<string, { nextCheck: number; lastError: string; isDepleted: boolean }> = new Map();
 
   constructor() {
-    this.start();
+    // Only auto-start if not in AI Studio
+    if (!isAiStudioEnvironment()) {
+      this.start();
+    }
   }
 
   public resetCooldown(autoId: string) {
@@ -19,6 +23,9 @@ export class SourceMonitor {
   }
 
   public start() {
+    if (isAiStudioEnvironment()) {
+      return;
+    }
     if (this.timer) clearInterval(this.timer);
     this.timer = setInterval(() => {
       this.checkSources();
