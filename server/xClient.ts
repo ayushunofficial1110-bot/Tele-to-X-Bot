@@ -346,8 +346,11 @@ export class XClient {
       }
     }
 
-    if (this.defaultBearerToken && this.defaultBearerToken.trim() && !this.defaultBearerToken.includes('TODO')) {
-      candidateTokens.push(this.defaultBearerToken.trim());
+    const envBearer = (process.env.TWITTER_BEARER_TOKEN || this.defaultBearerToken || '')
+      .replace(/^["']|["']$/g, '')
+      .trim();
+    if (envBearer && !envBearer.includes('TODO')) {
+      candidateTokens.push(envBearer);
     }
 
     // Deduplicate candidate tokens
@@ -364,7 +367,7 @@ export class XClient {
     let lastError: Error | null = null;
     for (const bearer of candidateTokens) {
       try {
-        return await this.fetchViaOfficialApi(handle, sinceId, bearer);
+        return await this.fetchViaOfficialApi(handle, sinceId, bearer, authorHandle);
       } catch (err: unknown) {
         lastError = err instanceof Error ? err : new Error(String(err));
         // If credits depleted or 403, try next candidate token if available
@@ -375,23 +378,50 @@ export class XClient {
     throw lastError || new Error(`Failed polling ${authorHandle} via Official X API`);
   }
 
-  private async fetchViaOfficialApi(handle: string, sinceId: string | undefined, bearer: string): Promise<XTweet[]> {
+  private async fetchViaOfficialApi(
+    handle: string,
+    sinceId: string | undefined,
+    bearer: string,
+    authorHandle: string = handle
+  ): Promise<XTweet[]> {
+    const authorRef = authorHandle || (handle.startsWith('@') ? handle : `@${handle}`);
+
     // 1. Look up user ID by username
     const userRes = await fetch(`https://api.twitter.com/2/users/by/username/${handle}`, {
       headers: { Authorization: `Bearer ${bearer}` },
     });
 
+    if (userRes.status === 429) {
+      const resetHeader = userRes.headers.get('x-rate-limit-reset');
+      const resetSeconds = resetHeader ? Math.max(1, parseInt(resetHeader) - Math.floor(Date.now() / 1000)) : 60;
+      const err = new Error(`X API Rate Limit reached for user lookup of @${handle}. Rate limit resets in ${resetSeconds}s.`);
+      (err as any).isRateLimit = true;
+      (err as any).status = 429;
+      throw err;
+    }
+
     const userJson = (await userRes.json()) as any;
     if (!userRes.ok || !userJson.data?.id) {
-      const errDetail = userJson.detail || userJson.errors?.[0]?.message || userRes.statusText;
-      if (errDetail?.toLowerCase().includes('credits depleted')) {
+      const errDetail = userJson.detail || userJson.errors?.[0]?.message || userJson.title || userRes.statusText;
+      const errorStr = (typeof errDetail === 'string' ? errDetail : JSON.stringify(errDetail)).toLowerCase();
+      const isCredits =
+        userRes.status === 402 ||
+        userJson.title?.toLowerCase().includes('credits') ||
+        userJson.type?.toLowerCase().includes('credits') ||
+        errorStr.includes('credits depleted') ||
+        errorStr.includes('credit balance') ||
+        errorStr.includes('quota') ||
+        errorStr.includes('usage cap');
+
+      if (isCredits) {
         const err = new Error(
-          `Official X API read quota depleted for @${handle} (credits depleted). Twitter Developer accounts on Free tier allow write access (Telegram ➔ X), while timeline read access requires X API credits or an updated TWITTER_BEARER_TOKEN.`
+          `Official X API read quota depleted for ${authorRef} (credits depleted). Twitter Developer accounts on Free tier allow write access (Telegram ➔ X), while timeline read access requires X API credits or an updated TWITTER_BEARER_TOKEN.`
         );
         (err as any).isCreditsDepleted = true;
+        (err as any).status = userRes.status;
         throw err;
       }
-      throw new Error(`Official X API user lookup for @${handle} failed: ${errDetail}`);
+      throw new Error(`Official X API user lookup for ${authorRef} failed: ${errDetail}`);
     }
     const xUserId = userJson.data.id;
 
@@ -408,13 +438,34 @@ export class XClient {
     if (tweetRes.status === 429) {
       const resetHeader = tweetRes.headers.get('x-rate-limit-reset');
       const resetSeconds = resetHeader ? Math.max(1, parseInt(resetHeader) - Math.floor(Date.now() / 1000)) : 60;
-      throw new Error(`X API Rate Limit reached for @${handle}. Rate limit resets in ${resetSeconds}s.`);
+      const err = new Error(`X API Rate Limit reached for ${authorRef}. Rate limit resets in ${resetSeconds}s.`);
+      (err as any).isRateLimit = true;
+      (err as any).status = 429;
+      throw err;
     }
 
     const tweetJson = (await tweetRes.json()) as any;
     if (!tweetRes.ok) {
-      const errDetail = tweetJson.detail || tweetJson.errors?.[0]?.message || tweetRes.statusText;
-      throw new Error(`Official X API tweet fetch for @${handle} failed: ${errDetail}`);
+      const errDetail = tweetJson.detail || tweetJson.errors?.[0]?.message || tweetJson.title || tweetRes.statusText;
+      const errorStr = (typeof errDetail === 'string' ? errDetail : JSON.stringify(errDetail)).toLowerCase();
+      const isCredits =
+        tweetRes.status === 402 ||
+        tweetJson.title?.toLowerCase().includes('credits') ||
+        tweetJson.type?.toLowerCase().includes('credits') ||
+        errorStr.includes('credits depleted') ||
+        errorStr.includes('credit balance') ||
+        errorStr.includes('quota') ||
+        errorStr.includes('usage cap');
+
+      if (isCredits) {
+        const err = new Error(
+          `Official X API read quota depleted for ${authorRef} (credits depleted). Twitter Developer accounts on Free tier allow write access (Telegram ➔ X), while timeline read access requires X API credits or an updated TWITTER_BEARER_TOKEN.`
+        );
+        (err as any).isCreditsDepleted = true;
+        (err as any).status = tweetRes.status;
+        throw err;
+      }
+      throw new Error(`Official X API tweet fetch for ${authorRef} failed: ${errDetail}`);
     }
 
     const tweets = tweetJson.data || [];
@@ -440,7 +491,7 @@ export class XClient {
       return {
         id: t.id,
         text: t.text,
-        author: `@${handle}`,
+        author: authorRef,
         createdAt: t.created_at || new Date().toISOString(),
         url: `https://x.com/${handle}/status/${t.id}`,
         media: mediaList,

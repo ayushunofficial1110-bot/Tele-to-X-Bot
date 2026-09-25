@@ -8,8 +8,10 @@ export class SourceMonitor {
   private timer: NodeJS.Timeout | null = null;
   private isChecking = false;
   private checkIntervalMs = 60000; // Poll every 60 seconds
-  // Tracks cooldowns per automation (e.g. rate limit, credits depleted) to prevent rapid error loops
+  // Tracks cooldowns per automation (e.g. rate limit reset) to prevent rapid error loops
   private pollCooldowns: Map<string, { nextCheck: number; lastError: string; isDepleted: boolean }> = new Map();
+  // Tracks last logged error to prevent duplicate system log spam
+  private lastLoggedErrors: Map<string, string> = new Map();
 
   constructor() {
     // Only auto-start if not in AI Studio
@@ -20,6 +22,7 @@ export class SourceMonitor {
 
   public resetCooldown(autoId: string) {
     this.pollCooldowns.delete(autoId);
+    this.lastLoggedErrors.delete(autoId);
   }
 
   public start() {
@@ -93,8 +96,9 @@ export class SourceMonitor {
         }
       );
 
-      // On successful query, clear any prior cooldown and error state
+      // On successful query, clear any prior cooldown, error state, and logged warnings
       this.pollCooldowns.delete(auto.id);
+      this.lastLoggedErrors.delete(auto.id);
 
       if (!tweets || tweets.length === 0) {
         // Record last poll time
@@ -106,7 +110,13 @@ export class SourceMonitor {
       }
 
       // Process oldest to newest
-      const sorted = [...tweets].sort((a, b) => a.id.localeCompare(b.id));
+      const sorted = [...tweets].sort((a, b) => {
+        try {
+          return BigInt(a.id) < BigInt(b.id) ? -1 : 1;
+        } catch {
+          return a.id.localeCompare(b.id);
+        }
+      });
       let newestId = auto.lastSeenPostId;
 
       for (const t of sorted) {
@@ -130,39 +140,44 @@ export class SourceMonitor {
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       const isCreditsDepleted = Boolean(
-        (err as any)?.isCreditsDepleted || msg.toLowerCase().includes('credits depleted')
+        (err as any)?.isCreditsDepleted ||
+        msg.toLowerCase().includes('credits depleted') ||
+        msg.toLowerCase().includes('read quota depleted') ||
+        msg.toLowerCase().includes('quota') ||
+        msg.toLowerCase().includes('usage cap')
       );
-      const isRateLimit = msg.toLowerCase().includes('rate limit') || msg.includes('429');
+      const isRateLimit = Boolean((err as any)?.isRateLimit || msg.toLowerCase().includes('rate limit') || msg.includes('429'));
 
-      // Backoff duration: 60 minutes for depleted credits, 15m for rate limit, 5m for transient
-      const cooldownMs = isCreditsDepleted ? 60 * 60 * 1000 : isRateLimit ? 15 * 60 * 1000 : 5 * 60 * 1000;
-      const cooldownMinutes = Math.round(cooldownMs / 60000);
-
-      const prevCooldown = this.pollCooldowns.get(auto.id);
-      const isStatusTransition = !prevCooldown || prevCooldown.isDepleted !== isCreditsDepleted;
-
-      this.pollCooldowns.set(auto.id, {
-        nextCheck: Date.now() + cooldownMs,
-        lastError: msg,
-        isDepleted: isCreditsDepleted,
-      });
+      // If rate limited, hold off for 60 seconds. For depleted credits or transient errors, do not block the next cycle
+      if (isRateLimit) {
+        this.pollCooldowns.set(auto.id, {
+          nextCheck: Date.now() + 60 * 1000,
+          lastError: msg,
+          isDepleted: false,
+        });
+      } else {
+        this.pollCooldowns.delete(auto.id);
+      }
 
       // Provide clear user-facing guidance
       const friendlyNotice = isCreditsDepleted
-        ? `X API read quota depleted for ${handle}. Official X Developer Free Tier supports posting to X (Telegram ➔ X), but reading timelines requires X API Basic credits. Check back after credits refresh or update TWITTER_BEARER_TOKEN.`
+        ? `Official X API read quota is currently depleted for ${handle}. Official X Developer Free Tier supports posting to X (Telegram ➔ X), but reading timelines requires X API Basic credits. Check back after credits refresh or update TWITTER_BEARER_TOKEN.`
         : msg;
 
+      // Store clear lastError on the automation. Do not advance lastSeenPostId.
       db.updateAutomation(auto.id, auto.userId, {
         lastError: friendlyNotice,
         lastPollAt: new Date().toISOString(),
       });
 
-      // Log only on initial transition as an informative notice with cooldown info, NOT repeating spam
-      if (isStatusTransition) {
+      // Log once per unique error state to avoid repeating log spam on Render
+      const prevLogged = this.lastLoggedErrors.get(auto.id);
+      if (prevLogged !== friendlyNotice) {
+        this.lastLoggedErrors.set(auto.id, friendlyNotice);
         db.logSystem(
-          'info',
+          'warn',
           'monitor',
-          `Polling paused for X source ${handle}: ${friendlyNotice} (Next automatic check in ${cooldownMinutes}m)`,
+          `Polling X source ${handle}: ${friendlyNotice}`,
           auto.userId
         );
       }

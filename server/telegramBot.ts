@@ -1,7 +1,14 @@
 import crypto from 'node:crypto';
 import { db } from './db.ts';
 import { automationQueue } from './queue.ts';
-import { telegramClient, parseTelegramChannelInput, isXUrl, formatXInput } from './telegramClient.ts';
+import { xClient } from './xClient.ts';
+import {
+  telegramClient,
+  parseTelegramChannelInput,
+  isXUrl,
+  formatXInput,
+  getBridgeDisplayName,
+} from './telegramClient.ts';
 import { sourceMonitor } from './monitor.ts';
 import { BotUser, Automation, TelegramInlineButton } from '../src/types.ts';
 import { getTelegramButtonUrl, isAiStudioEnvironment } from './config.ts';
@@ -748,7 +755,7 @@ export class TelegramBotHandler {
       const wizard: WizardState = { step: 'source', direction: 'x_to_telegram' };
       userWizards.set(user.id, wizard);
       return {
-        text: `🐦 **Step 1 of 2: Which X (Twitter) account do you want to monitor?**\n\nPlease send the X profile/post URL or handle in the chat below (for example: \`https://x.com/OpenAI\` or \`@OpenAI\`):\n\n*(No password or API key is required)*`,
+        text: `🐦 **Step 1 of 2: Which X (Twitter) account do you want to monitor?**\n\nPlease send the X profile URL in the chat below (for example: \`https://x.com/OpenAI\`):\n\n*(No password or API key is required)*`,
         replyMarkup: {
           inline_keyboard: [[{ text: '« Cancel', callback_data: 'main_menu' }]],
         },
@@ -828,28 +835,18 @@ export class TelegramBotHandler {
 
     if (wizard.step === 'source') {
       if (wizard.direction === 'x_to_telegram') {
-        // If user provided an X/Twitter URL (profile or post URL), preserve it exactly as a clickable URL
-        if (isXUrl(cleanInput)) {
-          const xUrl = formatXInput(cleanInput);
-          wizard.source = xUrl;
-          wizard.step = 'destination';
+        // Format source strictly as an X/Twitter URL. Never format as a Telegram-style @username!
+        const xUrl = formatXInput(cleanInput);
+        if (!xUrl || !/^https:\/\/x\.com\/[a-zA-Z0-9_]{1,25}/i.test(xUrl)) {
           return {
-            text: `✅ Source set to: ${xUrl}\n\n📢 **Step 2 of 2: Where should new posts be published in Telegram?**\n\n1️⃣ Add this bot as an **Administrator** in your Telegram channel with *Post Messages* permission.\n2️⃣ Send your channel username or link below (for example: \`@my_channel\` or \`https://t.me/my_channel\`):`,
+            text: `⚠️ Please enter a valid X (Twitter) URL (e.g. \`https://x.com/OpenAI\`):`,
             replyMarkup: { inline_keyboard: [[{ text: '« Cancel', callback_data: 'main_menu' }]] },
           };
         }
-
-        const handle = cleanInput.startsWith('@') ? cleanInput : `@${cleanInput}`;
-        if (!/^@[a-zA-Z0-9_]{1,25}$/.test(handle)) {
-          return {
-            text: `⚠️ Please enter a valid X (Twitter) URL (e.g. \`https://x.com/OpenAI\`) or handle (\`@OpenAI\`):`,
-            replyMarkup: { inline_keyboard: [[{ text: '« Cancel', callback_data: 'main_menu' }]] },
-          };
-        }
-        wizard.source = handle;
+        wizard.source = xUrl;
         wizard.step = 'destination';
         return {
-          text: `✅ Source set to: **${handle}**\n\n📢 **Step 2 of 2: Where should new posts be published in Telegram?**\n\n1️⃣ Add this bot as an **Administrator** in your Telegram channel with *Post Messages* permission.\n2️⃣ Send your channel username or link below (for example: \`@my_channel\` or \`https://t.me/my_channel\`):`,
+          text: `✅ Source set to: ${xUrl}\n\n📢 **Step 2 of 2: Where should new posts be published in Telegram?**\n\n1️⃣ Add this bot as an **Administrator** in your Telegram channel with *Post Messages* permission.\n2️⃣ Send your channel username or link below (for example: \`@my_channel\` or \`https://t.me/my_channel\`):`,
           replyMarkup: { inline_keyboard: [[{ text: '« Cancel', callback_data: 'main_menu' }]] },
         };
       } else {
@@ -866,8 +863,8 @@ export class TelegramBotHandler {
 
         const userXHandle = user.settings.xCredentials?.accountHandle;
         const destination = userXHandle
-          ? (userXHandle.startsWith('http') ? userXHandle : `https://x.com/${userXHandle.replace(/^@/, '')}`)
-          : (user.telegramUsername ? `https://x.com/${user.telegramUsername.replace(/^@/, '')}` : 'https://x.com');
+          ? formatXInput(userXHandle)
+          : (user.telegramUsername ? formatXInput(user.telegramUsername) : 'https://x.com');
         wizard.destination = destination;
 
         return this.finishWizard(user, wizard);
@@ -886,18 +883,18 @@ export class TelegramBotHandler {
         }
         destination = parsed.canonical;
       } else {
-        // Destination is X: preserve URL as clickable URL or format handle without prepending @ to URLs
+        // Destination is X: preserve URL as clickable URL using formatXInput
         destination = formatXInput(cleanInput);
       }
 
       wizard.destination = destination;
-      return this.finishWizard(user, wizard);
+      return await this.finishWizard(user, wizard);
     }
 
     return this.getMainMenu(user);
   }
 
-  private finishWizard(user: BotUser, wizard: WizardState): TelegramMessageResponse {
+  private async finishWizard(user: BotUser, wizard: WizardState): Promise<TelegramMessageResponse> {
     userWizards.delete(user.id);
 
     const newAuto: Automation = {
@@ -925,13 +922,53 @@ export class TelegramBotHandler {
       updatedAt: new Date().toISOString(),
     };
 
+    const isXToTg = newAuto.direction === 'x_to_telegram';
+    let initialErrorNotice: string | undefined = undefined;
+
+    if (isXToTg) {
+      try {
+        const creds = user.settings?.xCredentials;
+        const testTweets = await xClient.fetchRecentTweets(newAuto.source, undefined, {
+          bearerToken: creds?.bearerToken,
+          oauth2AccessToken: creds?.oauth2AccessToken,
+        });
+        if (testTweets && testTweets.length > 0) {
+          const newest = [...testTweets].sort((a, b) => {
+            try {
+              return BigInt(a.id) < BigInt(b.id) ? -1 : 1;
+            } catch {
+              return a.id.localeCompare(b.id);
+            }
+          }).pop();
+          if (newest) {
+            newAuto.lastSeenPostId = newest.id;
+          }
+        }
+      } catch (checkErr: unknown) {
+        const errMsg = checkErr instanceof Error ? checkErr.message : String(checkErr);
+        const isQuota =
+          (checkErr as any)?.isCreditsDepleted ||
+          errMsg.toLowerCase().includes('credits depleted') ||
+          errMsg.toLowerCase().includes('quota') ||
+          errMsg.toLowerCase().includes('usage cap');
+        initialErrorNotice = isQuota
+          ? `Official X API read quota is currently depleted for ${newAuto.source}. Free tier permits posting to X (Telegram ➔ X), but reading timelines requires X API Basic credits or an updated TWITTER_BEARER_TOKEN.`
+          : errMsg;
+        newAuto.lastError = initialErrorNotice;
+      }
+    }
+
     db.createAutomation(newAuto);
     db.logSystem('info', 'telegram_bot', `User activated cross-posting bridge: ${newAuto.name}`, user.id);
 
-    const isXToTg = newAuto.direction === 'x_to_telegram';
+    const bridgeName = getBridgeDisplayName(newAuto);
+
+    const statusLine = initialErrorNotice
+      ? `⚠️ **Active (Notice: X API Read Quota Depleted)**\n\n⚠️ **Notice**: ${initialErrorNotice}\n*Timeline monitoring will automatically sync new posts as soon as valid X read credits or bearer token are detected.*`
+      : `🟢 **Active**`;
 
     return {
-      text: `🎉 **Cross-Posting Bridge is Live!**\n\n• **Bridge**: ${newAuto.name}\n• **Direction**: ${isXToTg ? 'X (Twitter) ➔ Telegram' : 'Telegram ➔ X (Twitter)'}\n• **Status**: 🟢 **Active**\n\n✨ **AI Fact Preservation**: Active (all dates, quotes & numbers preserved)\n🛡️ **Spam & Ad Filter**: Active (promotional ads & shills automatically blocked)\n📸 **Media Synchronization**: Active (photos, videos & galleries)`,
+      text: `🎉 **Cross-Posting Bridge is Live!**\n\n• **Bridge**: ${bridgeName}\n• **Direction**: ${isXToTg ? 'X (Twitter) ➔ Telegram' : 'Telegram ➔ X (Twitter)'}\n• **Status**: ${statusLine}\n\n✨ **AI Fact Preservation**: Active (all dates, quotes & numbers preserved)\n🛡️ **Spam & Ad Filter**: Active (promotional ads & shills automatically blocked)\n📸 **Media Synchronization**: Active (photos, videos & galleries)`,
       replyMarkup: {
         inline_keyboard: [
           [{ text: '⚡ View My Bridges', callback_data: 'view_automations' }],
@@ -946,6 +983,7 @@ export class TelegramBotHandler {
   private getMainMenu(user: BotUser): TelegramMessageResponse {
     const automations = db.getAutomations(user.id);
     const activeCount = automations.filter((a) => a.status === 'active').length;
+    const warningCount = automations.filter((a) => a.status === 'active' && a.lastError).length;
     const webLoginUrl = getTelegramButtonUrl(`/?auth_token=${user.authToken}`);
 
     // If new user with 0 automations, present the guided welcome onboarding
@@ -969,8 +1007,13 @@ export class TelegramBotHandler {
       };
     }
 
+    let workspaceLine = `• Active Bridges: **${activeCount} / ${automations.length}**`;
+    if (warningCount > 0) {
+      workspaceLine += ` (⚠️ ${warningCount} pending X credits)`;
+    }
+
     return {
-      text: `👋 **Welcome back, ${user.firstName}!**\n\n📊 **Your Workspace:**\n• Active Bridges: **${activeCount} / ${automations.length}**\n• Posts Processed: **${user.postsProcessedCount || 0}**\n• Ads Blocked: **${user.postsFilteredAdsCount || 0}**\n\nSelect an option below or open your personal Web Dashboard:`,
+      text: `👋 **Welcome back, ${user.firstName}!**\n\n📊 **Your Workspace:**\n${workspaceLine}\n• Posts Processed: **${user.postsProcessedCount || 0}**\n• Ads Blocked: **${user.postsFilteredAdsCount || 0}**\n\nSelect an option below or open your personal Web Dashboard:`,
       replyMarkup: {
         inline_keyboard: [
           [{ text: '⚡ My Bridges', callback_data: 'view_automations' }],
@@ -1010,8 +1053,18 @@ export class TelegramBotHandler {
     const keyboard: TelegramInlineButton[][] = [];
 
     automations.forEach((auto, i) => {
-      const icon = auto.status === 'active' ? '🟢' : '⏸️';
-      text += `${i + 1}. ${icon} **${auto.name}**\n   Processed: ${auto.stats.processedCount} | Blocked Ads: ${auto.stats.skippedAdsCount}\n\n`;
+      const isPaused = auto.status !== 'active';
+      const isQuota = auto.lastError?.toLowerCase().includes('quota') || auto.lastError?.toLowerCase().includes('credits');
+      let icon = '🟢';
+      let errorLine = '';
+      if (isPaused) {
+        icon = '⏸️';
+      } else if (auto.lastError) {
+        icon = '⚠️';
+        errorLine = `   ⚠️ **Status Note**: ${isQuota ? 'X API Read Quota Depleted' : 'X Reading Issue'}\n`;
+      }
+      const displayName = getBridgeDisplayName(auto);
+      text += `${i + 1}. ${icon} **${displayName}**\n${errorLine}   Processed: ${auto.stats.processedCount} | Blocked Ads: ${auto.stats.skippedAdsCount}\n\n`;
       keyboard.push([
         { text: `${auto.status === 'active' ? '⏸️ Pause' : '▶️ Resume'} #${i + 1}`, callback_data: `auto_toggle_${auto.id}` },
         { text: `🗑️ Delete #${i + 1}`, callback_data: `auto_del_${auto.id}` },

@@ -284,7 +284,7 @@ async function startServer() {
     res.json({ ok: true, automations });
   });
 
-  app.post('/api/user/automations', (req, res) => {
+  app.post('/api/user/automations', async (req, res) => {
     try {
       const { userId, name, direction, source, destination, settings } = req.body;
       if (!userId || !source || !destination) {
@@ -336,6 +336,41 @@ async function startServer() {
         updatedAt: new Date().toISOString(),
       });
 
+      if (created.direction === 'x_to_telegram') {
+        const creds = user?.settings?.xCredentials;
+        try {
+          const testTweets = await xClient.fetchRecentTweets(created.source, undefined, {
+            bearerToken: creds?.bearerToken,
+            oauth2AccessToken: creds?.oauth2AccessToken,
+          });
+          if (testTweets && testTweets.length > 0) {
+            const newest = [...testTweets].sort((a, b) => {
+              try {
+                return BigInt(a.id) < BigInt(b.id) ? -1 : 1;
+              } catch {
+                return a.id.localeCompare(b.id);
+              }
+            }).pop();
+            if (newest) {
+              db.updateAutomation(created.id, userId, { lastSeenPostId: newest.id });
+              created.lastSeenPostId = newest.id;
+            }
+          }
+        } catch (checkErr: unknown) {
+          const errMsg = checkErr instanceof Error ? checkErr.message : String(checkErr);
+          const isQuota =
+            (checkErr as any)?.isCreditsDepleted ||
+            errMsg.toLowerCase().includes('credits depleted') ||
+            errMsg.toLowerCase().includes('quota') ||
+            errMsg.toLowerCase().includes('usage cap');
+          const notice = isQuota
+            ? `Official X API read quota is currently depleted for ${created.source}. Free tier permits posting to X (Telegram ➔ X), but reading requires X API Basic credits. You can still test your bridge using the 'Test Run' button.`
+            : errMsg;
+          db.updateAutomation(created.id, userId, { lastError: notice });
+          created.lastError = notice;
+        }
+      }
+
       db.logSystem('info', 'api', `Created automation ${created.name}`, userId);
       res.json({ ok: true, automation: created });
     } catch (err: unknown) {
@@ -379,7 +414,12 @@ async function startServer() {
           );
         } catch (pollErr: unknown) {
           const pollMsg = pollErr instanceof Error ? pollErr.message : String(pollErr);
-          const isCreditsDepleted = pollMsg.toLowerCase().includes('credits depleted');
+          const isCreditsDepleted = Boolean(
+            (pollErr as any)?.isCreditsDepleted ||
+            pollMsg.toLowerCase().includes('credits depleted') ||
+            pollMsg.toLowerCase().includes('quota') ||
+            pollMsg.toLowerCase().includes('usage cap')
+          );
           const notice = isCreditsDepleted
             ? `Official X API read quota is currently depleted for ${auto.source}. Free tier permits posting to X (Telegram ➔ X), but reading requires X API Basic credits. You can still test your bridge using the 'Test Run' button.`
             : pollMsg;
@@ -398,7 +438,15 @@ async function startServer() {
         }
 
         if (tweets && tweets.length > 0) {
-          for (const t of tweets) {
+          const sorted = [...tweets].sort((a, b) => {
+            try {
+              return BigInt(a.id) < BigInt(b.id) ? -1 : 1;
+            } catch {
+              return a.id.localeCompare(b.id);
+            }
+          });
+
+          for (const t of sorted) {
             automationQueue.enqueuePost(auto, {
               sourcePostId: t.id,
               sourceAuthor: t.author,
@@ -407,12 +455,13 @@ async function startServer() {
               media: t.media,
             });
           }
+          const newest = sorted[sorted.length - 1];
           db.updateAutomation(auto.id, userId, {
-            lastSeenPostId: tweets[0].id,
+            lastSeenPostId: newest.id,
             lastPollAt: new Date().toISOString(),
             lastError: undefined,
           });
-          return res.json({ ok: true, syncedCount: tweets.length, message: `Queued ${tweets.length} new tweets for processing!` });
+          return res.json({ ok: true, syncedCount: sorted.length, message: `Queued ${sorted.length} new tweets for processing!` });
         }
 
         db.updateAutomation(auto.id, userId, {

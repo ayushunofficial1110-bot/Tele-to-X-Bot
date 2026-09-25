@@ -433,12 +433,18 @@ export const UserDashboard: React.FC<UserDashboardProps> = ({
                   <div className="flex items-center space-x-2">
                     <span
                       className={`px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider ${
-                        auto.status === 'active'
-                          ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20'
-                          : 'bg-amber-500/10 text-amber-400 border border-amber-500/20'
+                        auto.status !== 'active'
+                          ? 'bg-amber-500/10 text-amber-400 border border-amber-500/20'
+                          : auto.lastError
+                          ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40'
+                          : 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20'
                       }`}
                     >
-                      {auto.status}
+                      {auto.status !== 'active'
+                        ? 'Paused'
+                        : auto.lastError
+                        ? 'Quota Notice'
+                        : 'Active'}
                     </span>
                     <span className="text-xs font-bold text-slate-300">
                       {auto.direction === 'x_to_telegram' ? 'X ➔ Telegram' : 'Telegram ➔ X'}

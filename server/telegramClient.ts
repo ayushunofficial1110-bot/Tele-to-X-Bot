@@ -1,51 +1,13 @@
 import { db } from './db.ts';
 
+export { isXUrl, formatXInput, extractXUsername, getBridgeDisplayName } from './xFormat.ts';
+import { isXUrl } from './xFormat.ts';
+
 export interface TelegramSendMessageOptions {
   parse_mode?: 'HTML' | 'Markdown' | 'MarkdownV2';
   disable_web_page_preview?: boolean;
   reply_markup?: any;
   reply_to_message_id?: number;
-}
-
-/**
- * Checks whether an input string is an X (Twitter) URL (profile, post, or web link).
- */
-export function isXUrl(input: string): boolean {
-  if (!input || typeof input !== 'string') return false;
-  const trimmed = input.trim();
-  return /^(?:https?:\/\/)?(?:www\.)?(?:twitter\.com|x\.com)\/[^\s]+/i.test(trimmed);
-}
-
-/**
- * Normalizes an X input:
- * - If it is an X/Twitter URL (e.g. https://x.com/OpenAI or twitter.com/user/status/123),
- *   preserve it as a clickable URL exactly as a URL (ensuring https:// prefix).
- *   NEVER prepend '@' or format as a Telegram @username!
- * - If it is a handle without URL (e.g. OpenAI or @OpenAI), preserve the handle.
- */
-export function formatXInput(input: string): string {
-  if (!input || typeof input !== 'string') return '';
-  const trimmed = input.trim();
-  if (isXUrl(trimmed)) {
-    if (/^https?:\/\//i.test(trimmed)) {
-      return trimmed;
-    }
-    return `https://${trimmed.replace(/^www\./i, '')}`;
-  }
-  return trimmed.startsWith('@') ? trimmed : `@${trimmed}`;
-}
-
-/**
- * Extracts the raw username from an X handle or X URL for API queries.
- */
-export function extractXUsername(input: string): string {
-  if (!input || typeof input !== 'string') return '';
-  const trimmed = input.trim();
-  const urlMatch = trimmed.match(/(?:https?:\/\/)?(?:www\.)?(?:twitter\.com|x\.com)\/([a-zA-Z0-9_]{1,25})/i);
-  if (urlMatch) {
-    return urlMatch[1];
-  }
-  return trimmed.replace(/^@+/, '').trim();
 }
 
 /**

@@ -8,6 +8,38 @@ import fs from "fs";
 import path from "path";
 import crypto from "node:crypto";
 import { MongoClient } from "mongodb";
+
+// server/xFormat.ts
+function isXUrl(input) {
+  if (!input || typeof input !== "string") return false;
+  const cleaned = input.trim().replace(/^<|>$/g, "").replace(/^\(|\)$/g, "");
+  return /^(?:https?:\/\/)?(?:(?:[a-zA-Z0-9-]+\.)?)*(?:twitter\.com|x\.com)\/[^\s]+/i.test(cleaned);
+}
+function formatXInput(input) {
+  if (!input || typeof input !== "string") return "";
+  const cleaned = input.trim().replace(/^<|>$/g, "").replace(/^\(|\)$/g, "");
+  if (isXUrl(cleaned)) {
+    let url = cleaned;
+    if (!/^https?:\/\//i.test(url)) {
+      url = `https://${url}`;
+    }
+    url = url.replace(/^https?:\/\/(?:(?:[a-zA-Z0-9-]+\.)?)*(?:twitter\.com|x\.com)\/@?/i, "https://x.com/");
+    return url;
+  }
+  const rawUsername = cleaned.replace(/^@+/, "").trim();
+  if (rawUsername.length > 0) {
+    return `https://x.com/${rawUsername}`;
+  }
+  return "";
+}
+function getBridgeDisplayName(auto) {
+  const isXToTg = auto.direction === "x_to_telegram";
+  const cleanSource = isXToTg ? formatXInput(auto.source) : auto.source;
+  const cleanDestination = !isXToTg ? formatXInput(auto.destination) : auto.destination;
+  return `${cleanSource} \u2794 ${cleanDestination}`;
+}
+
+// server/db.ts
 var DATA_DIR = path.join(process.cwd(), "data");
 var DB_FILE = path.join(DATA_DIR, "db.json");
 var startTime = Date.now();
@@ -71,6 +103,41 @@ var Database = class {
       );
     }
   }
+  normalizeAutomation(auto) {
+    if (!auto) return auto;
+    let changed = false;
+    if (auto.direction === "x_to_telegram") {
+      const canonicalSource = formatXInput(auto.source);
+      if (canonicalSource && canonicalSource !== auto.source) {
+        auto.source = canonicalSource;
+        changed = true;
+      }
+      const canonicalName = getBridgeDisplayName(auto);
+      if (auto.name !== canonicalName) {
+        auto.name = canonicalName;
+        changed = true;
+      }
+    } else if (auto.direction === "telegram_to_x") {
+      const canonicalDest = formatXInput(auto.destination);
+      if (canonicalDest && canonicalDest !== auto.destination) {
+        auto.destination = canonicalDest;
+        changed = true;
+      }
+      const canonicalName = getBridgeDisplayName(auto);
+      if (auto.name !== canonicalName) {
+        auto.name = canonicalName;
+        changed = true;
+      }
+    }
+    if (changed && this.isMongoConnected && this.mongoDb) {
+      this.mongoDb.collection("automations").updateOne(
+        { id: auto.id, userId: auto.userId },
+        { $set: { source: auto.source, destination: auto.destination, name: auto.name } }
+      ).catch(() => {
+      });
+    }
+    return auto;
+  }
   async hydrateFromMongo() {
     if (!this.mongoDb) return;
     try {
@@ -82,7 +149,7 @@ var Database = class {
         this.mongoDb.collection("settings").findOne({ _id: "global" })
       ]);
       if (users.length > 0) this.data.users = users;
-      if (automations.length > 0) this.data.automations = automations;
+      if (automations.length > 0) this.data.automations = automations.map((a) => this.normalizeAutomation(a));
       if (posts.length > 0) this.data.posts = posts;
       if (otherBots.length > 0) this.data.otherBots = otherBots;
       if (settingsDoc?.settings) {
@@ -103,9 +170,10 @@ var Database = class {
       if (fs.existsSync(DB_FILE)) {
         const raw = fs.readFileSync(DB_FILE, "utf-8");
         const parsed = JSON.parse(raw);
+        const rawAutos = Array.isArray(parsed.automations) ? parsed.automations : [];
         return {
           users: Array.isArray(parsed.users) ? parsed.users : [],
-          automations: Array.isArray(parsed.automations) ? parsed.automations : [],
+          automations: rawAutos.map((a) => this.normalizeAutomation(a)),
           posts: Array.isArray(parsed.posts) ? parsed.posts : [],
           otherBots: Array.isArray(parsed.otherBots) ? parsed.otherBots : [],
           systemLogs: Array.isArray(parsed.systemLogs) ? parsed.systemLogs : [],
@@ -198,13 +266,14 @@ var Database = class {
   }
   // --- Automations ---
   getAutomations(userId) {
-    return this.data.automations.filter((a) => a.userId === userId);
+    return this.data.automations.filter((a) => a.userId === userId).map((a) => this.normalizeAutomation(a));
   }
   getAllAutomations() {
-    return this.data.automations;
+    return this.data.automations.map((a) => this.normalizeAutomation(a));
   }
   getAutomation(id, userId) {
-    return this.data.automations.find((a) => a.id === id && (!userId || a.userId === userId));
+    const auto = this.data.automations.find((a) => a.id === id && (!userId || a.userId === userId));
+    return auto ? this.normalizeAutomation(auto) : void 0;
   }
   createAutomation(auto) {
     this.data.automations.push(auto);
@@ -452,23 +521,348 @@ var db = new Database();
 // server/telegramBot.ts
 import crypto3 from "node:crypto";
 
-// server/telegramClient.ts
-function isXUrl(input) {
-  if (!input || typeof input !== "string") return false;
-  const trimmed = input.trim();
-  return /^(?:https?:\/\/)?(?:www\.)?(?:twitter\.com|x\.com)\/[^\s]+/i.test(trimmed);
-}
-function formatXInput(input) {
-  if (!input || typeof input !== "string") return "";
-  const trimmed = input.trim();
-  if (isXUrl(trimmed)) {
-    if (/^https?:\/\//i.test(trimmed)) {
-      return trimmed;
-    }
-    return `https://${trimmed.replace(/^www\./i, "")}`;
+// server/xClient.ts
+import crypto2 from "node:crypto";
+var XClient = class {
+  constructor() {
+    this.defaultBearerToken = process.env.TWITTER_BEARER_TOKEN || "";
+    this.defaultClientId = process.env.TWITTER_CLIENT_ID || "";
+    this.defaultClientSecret = process.env.TWITTER_CLIENT_SECRET || "";
   }
-  return trimmed.startsWith("@") ? trimmed : `@${trimmed}`;
-}
+  // --- OAuth 2.0 PKCE Helpers ---
+  generatePKCE() {
+    const verifier = crypto2.randomBytes(32).toString("base64url");
+    const challenge = crypto2.createHash("sha256").update(verifier).digest("base64url");
+    return { verifier, challenge };
+  }
+  getOAuth2AuthorizeUrl(options) {
+    const clientId = options.clientId || this.defaultClientId || "TWITTER_CLIENT_ID";
+    const params = new URLSearchParams({
+      response_type: "code",
+      client_id: clientId,
+      redirect_uri: options.redirectUri,
+      scope: "tweet.read tweet.write users.read offline.access",
+      state: options.state,
+      code_challenge: options.codeChallenge,
+      code_challenge_method: "S256"
+    });
+    return `https://twitter.com/i/oauth2/authorize?${params.toString()}`;
+  }
+  async exchangeOAuth2Code(options) {
+    const clientId = options.clientId || this.defaultClientId;
+    const clientSecret = options.clientSecret || this.defaultClientSecret;
+    const bodyParams = new URLSearchParams({
+      code: options.code,
+      grant_type: "authorization_code",
+      client_id: clientId,
+      redirect_uri: options.redirectUri,
+      code_verifier: options.codeVerifier
+    });
+    const headers = {
+      "Content-Type": "application/x-www-form-urlencoded"
+    };
+    if (clientSecret) {
+      headers["Authorization"] = `Basic ${Buffer.from(`${clientId}:${clientSecret}`).toString("base64")}`;
+    }
+    const res = await fetch("https://api.twitter.com/2/oauth2/token", {
+      method: "POST",
+      headers,
+      body: bodyParams.toString()
+    });
+    const json = await res.json();
+    if (!res.ok) {
+      throw new Error(`X OAuth2 exchange error: ${json.error_description || json.error || res.statusText}`);
+    }
+    return {
+      accessToken: json.access_token,
+      refreshToken: json.refresh_token,
+      expiresIn: json.expires_in || 7200,
+      scope: json.scope || ""
+    };
+  }
+  async refreshOAuth2Token(options) {
+    const clientId = options.clientId || this.defaultClientId;
+    const clientSecret = options.clientSecret || this.defaultClientSecret;
+    const bodyParams = new URLSearchParams({
+      grant_type: "refresh_token",
+      refresh_token: options.refreshToken,
+      client_id: clientId
+    });
+    const headers = {
+      "Content-Type": "application/x-www-form-urlencoded"
+    };
+    if (clientSecret) {
+      headers["Authorization"] = `Basic ${Buffer.from(`${clientId}:${clientSecret}`).toString("base64")}`;
+    }
+    const res = await fetch("https://api.twitter.com/2/oauth2/token", {
+      method: "POST",
+      headers,
+      body: bodyParams.toString()
+    });
+    const json = await res.json();
+    if (!res.ok) {
+      throw new Error(`X OAuth2 refresh error: ${json.error_description || json.error || res.statusText}`);
+    }
+    return {
+      accessToken: json.access_token,
+      refreshToken: json.refresh_token,
+      expiresIn: json.expires_in || 7200
+    };
+  }
+  // --- OAuth 1.0a Signature Generator (RFC 5849) ---
+  getOAuth1Header(options) {
+    const oauthParams = {
+      oauth_consumer_key: options.apiKey,
+      oauth_nonce: crypto2.randomBytes(16).toString("hex"),
+      oauth_signature_method: "HMAC-SHA1",
+      oauth_timestamp: Math.floor(Date.now() / 1e3).toString(),
+      oauth_token: options.accessToken,
+      oauth_version: "1.0"
+    };
+    const sortedKeys = Object.keys(oauthParams).sort();
+    const paramString = sortedKeys.map((k) => `${encodeURIComponent(k)}=${encodeURIComponent(oauthParams[k])}`).join("&");
+    const signatureBase = `${options.method.toUpperCase()}&${encodeURIComponent(options.url)}&${encodeURIComponent(paramString)}`;
+    const signingKey = `${encodeURIComponent(options.apiSecret)}&${encodeURIComponent(options.accessSecret)}`;
+    const signature = crypto2.createHmac("sha1", signingKey).update(signatureBase).digest("base64");
+    oauthParams["oauth_signature"] = signature;
+    const headerParts = Object.keys(oauthParams).sort().map((k) => `${encodeURIComponent(k)}="${encodeURIComponent(oauthParams[k])}"`);
+    return `OAuth ${headerParts.join(", ")}`;
+  }
+  // --- Posting Tweets (Telegram ➔ X) ---
+  async postTweet(creds, text, options) {
+    const url = "https://api.twitter.com/2/tweets";
+    const payload = { text };
+    if (options?.mediaIds && options.mediaIds.length > 0) {
+      payload.media = { media_ids: options.mediaIds };
+    }
+    if (options?.inReplyToTweetId) {
+      payload.reply = { in_reply_to_tweet_id: options.inReplyToTweetId };
+    }
+    const headers = {
+      "Content-Type": "application/json"
+    };
+    if (creds.oauth2AccessToken) {
+      headers["Authorization"] = `Bearer ${creds.oauth2AccessToken}`;
+    } else if (creds.apiKey && creds.apiSecret && creds.accessToken && creds.accessSecret) {
+      headers["Authorization"] = this.getOAuth1Header({
+        url,
+        method: "POST",
+        apiKey: creds.apiKey,
+        apiSecret: creds.apiSecret,
+        accessToken: creds.accessToken,
+        accessSecret: creds.accessSecret
+      });
+    } else if (creds.bearerToken) {
+      headers["Authorization"] = `Bearer ${creds.bearerToken}`;
+    } else if (this.defaultBearerToken) {
+      headers["Authorization"] = `Bearer ${this.defaultBearerToken}`;
+    } else {
+      throw new Error(
+        "No X (Twitter) credentials configured. Please authenticate via OAuth2 or provide API keys in Settings."
+      );
+    }
+    const res = await fetch(url, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(payload)
+    });
+    const json = await res.json();
+    if (!res.ok) {
+      const errorMsg = json.detail || json.errors?.[0]?.message || res.statusText;
+      const error = new Error(`X API [${res.status}]: ${errorMsg}`);
+      error.status = res.status;
+      error.data = json;
+      throw error;
+    }
+    return {
+      id: json.data?.id || `tweet_${Date.now()}`,
+      text: json.data?.text || text
+    };
+  }
+  async postThread(creds, threadTexts, mediaIds) {
+    const postedIds = [];
+    let lastTweetId = void 0;
+    for (let i = 0; i < threadTexts.length; i++) {
+      const text = threadTexts[i];
+      const tweetMedia = i === 0 ? mediaIds : void 0;
+      const result = await this.postTweet(creds, text, {
+        mediaIds: tweetMedia,
+        inReplyToTweetId: lastTweetId
+      });
+      postedIds.push(result.id);
+      lastTweetId = result.id;
+      if (i < threadTexts.length - 1) {
+        await new Promise((r) => setTimeout(r, 1200));
+      }
+    }
+    return postedIds;
+  }
+  // --- Media Upload (X API v1.1) ---
+  async uploadMedia(creds, mediaBuffer, mimeType = "image/jpeg") {
+    const url = "https://upload.twitter.com/1.1/media/upload.json";
+    const formData = new FormData();
+    const blob = new Blob([mediaBuffer], { type: mimeType });
+    formData.append("media", blob);
+    const headers = {};
+    if (creds.apiKey && creds.apiSecret && creds.accessToken && creds.accessSecret) {
+      headers["Authorization"] = this.getOAuth1Header({
+        url,
+        method: "POST",
+        apiKey: creds.apiKey,
+        apiSecret: creds.apiSecret,
+        accessToken: creds.accessToken,
+        accessSecret: creds.accessSecret
+      });
+    } else if (creds.oauth2AccessToken) {
+      headers["Authorization"] = `Bearer ${creds.oauth2AccessToken}`;
+    } else {
+      throw new Error("X media upload requires OAuth credentials (API Key + Access Token or OAuth2).");
+    }
+    const res = await fetch(url, {
+      method: "POST",
+      headers,
+      body: formData
+    });
+    const json = await res.json();
+    if (!res.ok) {
+      throw new Error(`X Media Upload error: ${json.error || json.errors?.[0]?.message || res.statusText}`);
+    }
+    return json.media_id_string || String(json.media_id);
+  }
+  // --- Source Monitoring (X ➔ Telegram) using Official X API v2 ---
+  async fetchRecentTweets(authorHandle, sinceId, overrideBearerOrTokens) {
+    let handle = authorHandle.trim();
+    const urlMatch = handle.match(/(?:https?:\/\/)?(?:www\.)?(?:twitter\.com|x\.com)\/([a-zA-Z0-9_]{1,25})/i);
+    if (urlMatch) {
+      handle = urlMatch[1];
+    } else {
+      handle = handle.replace(/^@+/, "").trim();
+    }
+    let candidateTokens = [];
+    if (typeof overrideBearerOrTokens === "string" && overrideBearerOrTokens.trim()) {
+      candidateTokens.push(overrideBearerOrTokens.trim());
+    } else if (overrideBearerOrTokens && typeof overrideBearerOrTokens === "object") {
+      if (overrideBearerOrTokens.bearerToken?.trim()) {
+        candidateTokens.push(overrideBearerOrTokens.bearerToken.trim());
+      }
+      if (overrideBearerOrTokens.oauth2AccessToken?.trim()) {
+        candidateTokens.push(overrideBearerOrTokens.oauth2AccessToken.trim());
+      }
+    }
+    const envBearer = (process.env.TWITTER_BEARER_TOKEN || this.defaultBearerToken || "").replace(/^["']|["']$/g, "").trim();
+    if (envBearer && !envBearer.includes("TODO")) {
+      candidateTokens.push(envBearer);
+    }
+    candidateTokens = candidateTokens.filter((t, idx, arr) => arr.indexOf(t) === idx && t.length > 10);
+    if (candidateTokens.length === 0) {
+      const err = new Error(
+        `Official X API requires a valid TWITTER_BEARER_TOKEN or connected X OAuth 2.0 account to monitor ${authorHandle}.`
+      );
+      err.isMissingToken = true;
+      throw err;
+    }
+    let lastError = null;
+    for (const bearer of candidateTokens) {
+      try {
+        return await this.fetchViaOfficialApi(handle, sinceId, bearer, authorHandle);
+      } catch (err) {
+        lastError = err instanceof Error ? err : new Error(String(err));
+        continue;
+      }
+    }
+    throw lastError || new Error(`Failed polling ${authorHandle} via Official X API`);
+  }
+  async fetchViaOfficialApi(handle, sinceId, bearer, authorHandle = handle) {
+    const authorRef = authorHandle || (handle.startsWith("@") ? handle : `@${handle}`);
+    const userRes = await fetch(`https://api.twitter.com/2/users/by/username/${handle}`, {
+      headers: { Authorization: `Bearer ${bearer}` }
+    });
+    if (userRes.status === 429) {
+      const resetHeader = userRes.headers.get("x-rate-limit-reset");
+      const resetSeconds = resetHeader ? Math.max(1, parseInt(resetHeader) - Math.floor(Date.now() / 1e3)) : 60;
+      const err = new Error(`X API Rate Limit reached for user lookup of @${handle}. Rate limit resets in ${resetSeconds}s.`);
+      err.isRateLimit = true;
+      err.status = 429;
+      throw err;
+    }
+    const userJson = await userRes.json();
+    if (!userRes.ok || !userJson.data?.id) {
+      const errDetail = userJson.detail || userJson.errors?.[0]?.message || userJson.title || userRes.statusText;
+      const errorStr = (typeof errDetail === "string" ? errDetail : JSON.stringify(errDetail)).toLowerCase();
+      const isCredits = userRes.status === 402 || userJson.title?.toLowerCase().includes("credits") || userJson.type?.toLowerCase().includes("credits") || errorStr.includes("credits depleted") || errorStr.includes("credit balance") || errorStr.includes("quota") || errorStr.includes("usage cap");
+      if (isCredits) {
+        const err = new Error(
+          `Official X API read quota depleted for ${authorRef} (credits depleted). Twitter Developer accounts on Free tier allow write access (Telegram \u2794 X), while timeline read access requires X API credits or an updated TWITTER_BEARER_TOKEN.`
+        );
+        err.isCreditsDepleted = true;
+        err.status = userRes.status;
+        throw err;
+      }
+      throw new Error(`Official X API user lookup for ${authorRef} failed: ${errDetail}`);
+    }
+    const xUserId = userJson.data.id;
+    let url = `https://api.twitter.com/2/users/${xUserId}/tweets?max_results=10&tweet.fields=created_at,entities,attachments&expansions=attachments.media_keys&media.fields=url,preview_image_url,type,variants`;
+    if (sinceId) {
+      url += `&since_id=${sinceId}`;
+    }
+    const tweetRes = await fetch(url, {
+      headers: { Authorization: `Bearer ${bearer}` }
+    });
+    if (tweetRes.status === 429) {
+      const resetHeader = tweetRes.headers.get("x-rate-limit-reset");
+      const resetSeconds = resetHeader ? Math.max(1, parseInt(resetHeader) - Math.floor(Date.now() / 1e3)) : 60;
+      const err = new Error(`X API Rate Limit reached for ${authorRef}. Rate limit resets in ${resetSeconds}s.`);
+      err.isRateLimit = true;
+      err.status = 429;
+      throw err;
+    }
+    const tweetJson = await tweetRes.json();
+    if (!tweetRes.ok) {
+      const errDetail = tweetJson.detail || tweetJson.errors?.[0]?.message || tweetJson.title || tweetRes.statusText;
+      const errorStr = (typeof errDetail === "string" ? errDetail : JSON.stringify(errDetail)).toLowerCase();
+      const isCredits = tweetRes.status === 402 || tweetJson.title?.toLowerCase().includes("credits") || tweetJson.type?.toLowerCase().includes("credits") || errorStr.includes("credits depleted") || errorStr.includes("credit balance") || errorStr.includes("quota") || errorStr.includes("usage cap");
+      if (isCredits) {
+        const err = new Error(
+          `Official X API read quota depleted for ${authorRef} (credits depleted). Twitter Developer accounts on Free tier allow write access (Telegram \u2794 X), while timeline read access requires X API credits or an updated TWITTER_BEARER_TOKEN.`
+        );
+        err.isCreditsDepleted = true;
+        err.status = tweetRes.status;
+        throw err;
+      }
+      throw new Error(`Official X API tweet fetch for ${authorRef} failed: ${errDetail}`);
+    }
+    const tweets = tweetJson.data || [];
+    const mediaMap = /* @__PURE__ */ new Map();
+    if (tweetJson.includes?.media) {
+      for (const m of tweetJson.includes.media) {
+        mediaMap.set(m.media_key, {
+          type: m.type === "video" ? "video" : m.type === "animated_gif" ? "gif" : "image",
+          url: m.url || m.preview_image_url || ""
+        });
+      }
+    }
+    return tweets.map((t) => {
+      const mediaList = [];
+      if (t.attachments?.media_keys) {
+        for (const k of t.attachments.media_keys) {
+          const m = mediaMap.get(k);
+          if (m && m.url) mediaList.push(m);
+        }
+      }
+      return {
+        id: t.id,
+        text: t.text,
+        author: authorRef,
+        createdAt: t.created_at || (/* @__PURE__ */ new Date()).toISOString(),
+        url: `https://x.com/${handle}/status/${t.id}`,
+        media: mediaList
+      };
+    });
+  }
+};
+var xClient = new XClient();
+
+// server/telegramClient.ts
 function parseTelegramChannelInput(input) {
   if (!input || typeof input !== "string") {
     return { valid: false, canonical: "", error: "Channel identifier cannot be empty" };
@@ -791,321 +1185,6 @@ var TelegramClient = class {
   }
 };
 var telegramClient = new TelegramClient();
-
-// server/xClient.ts
-import crypto2 from "node:crypto";
-var XClient = class {
-  constructor() {
-    this.defaultBearerToken = process.env.TWITTER_BEARER_TOKEN || "";
-    this.defaultClientId = process.env.TWITTER_CLIENT_ID || "";
-    this.defaultClientSecret = process.env.TWITTER_CLIENT_SECRET || "";
-  }
-  // --- OAuth 2.0 PKCE Helpers ---
-  generatePKCE() {
-    const verifier = crypto2.randomBytes(32).toString("base64url");
-    const challenge = crypto2.createHash("sha256").update(verifier).digest("base64url");
-    return { verifier, challenge };
-  }
-  getOAuth2AuthorizeUrl(options) {
-    const clientId = options.clientId || this.defaultClientId || "TWITTER_CLIENT_ID";
-    const params = new URLSearchParams({
-      response_type: "code",
-      client_id: clientId,
-      redirect_uri: options.redirectUri,
-      scope: "tweet.read tweet.write users.read offline.access",
-      state: options.state,
-      code_challenge: options.codeChallenge,
-      code_challenge_method: "S256"
-    });
-    return `https://twitter.com/i/oauth2/authorize?${params.toString()}`;
-  }
-  async exchangeOAuth2Code(options) {
-    const clientId = options.clientId || this.defaultClientId;
-    const clientSecret = options.clientSecret || this.defaultClientSecret;
-    const bodyParams = new URLSearchParams({
-      code: options.code,
-      grant_type: "authorization_code",
-      client_id: clientId,
-      redirect_uri: options.redirectUri,
-      code_verifier: options.codeVerifier
-    });
-    const headers = {
-      "Content-Type": "application/x-www-form-urlencoded"
-    };
-    if (clientSecret) {
-      headers["Authorization"] = `Basic ${Buffer.from(`${clientId}:${clientSecret}`).toString("base64")}`;
-    }
-    const res = await fetch("https://api.twitter.com/2/oauth2/token", {
-      method: "POST",
-      headers,
-      body: bodyParams.toString()
-    });
-    const json = await res.json();
-    if (!res.ok) {
-      throw new Error(`X OAuth2 exchange error: ${json.error_description || json.error || res.statusText}`);
-    }
-    return {
-      accessToken: json.access_token,
-      refreshToken: json.refresh_token,
-      expiresIn: json.expires_in || 7200,
-      scope: json.scope || ""
-    };
-  }
-  async refreshOAuth2Token(options) {
-    const clientId = options.clientId || this.defaultClientId;
-    const clientSecret = options.clientSecret || this.defaultClientSecret;
-    const bodyParams = new URLSearchParams({
-      grant_type: "refresh_token",
-      refresh_token: options.refreshToken,
-      client_id: clientId
-    });
-    const headers = {
-      "Content-Type": "application/x-www-form-urlencoded"
-    };
-    if (clientSecret) {
-      headers["Authorization"] = `Basic ${Buffer.from(`${clientId}:${clientSecret}`).toString("base64")}`;
-    }
-    const res = await fetch("https://api.twitter.com/2/oauth2/token", {
-      method: "POST",
-      headers,
-      body: bodyParams.toString()
-    });
-    const json = await res.json();
-    if (!res.ok) {
-      throw new Error(`X OAuth2 refresh error: ${json.error_description || json.error || res.statusText}`);
-    }
-    return {
-      accessToken: json.access_token,
-      refreshToken: json.refresh_token,
-      expiresIn: json.expires_in || 7200
-    };
-  }
-  // --- OAuth 1.0a Signature Generator (RFC 5849) ---
-  getOAuth1Header(options) {
-    const oauthParams = {
-      oauth_consumer_key: options.apiKey,
-      oauth_nonce: crypto2.randomBytes(16).toString("hex"),
-      oauth_signature_method: "HMAC-SHA1",
-      oauth_timestamp: Math.floor(Date.now() / 1e3).toString(),
-      oauth_token: options.accessToken,
-      oauth_version: "1.0"
-    };
-    const sortedKeys = Object.keys(oauthParams).sort();
-    const paramString = sortedKeys.map((k) => `${encodeURIComponent(k)}=${encodeURIComponent(oauthParams[k])}`).join("&");
-    const signatureBase = `${options.method.toUpperCase()}&${encodeURIComponent(options.url)}&${encodeURIComponent(paramString)}`;
-    const signingKey = `${encodeURIComponent(options.apiSecret)}&${encodeURIComponent(options.accessSecret)}`;
-    const signature = crypto2.createHmac("sha1", signingKey).update(signatureBase).digest("base64");
-    oauthParams["oauth_signature"] = signature;
-    const headerParts = Object.keys(oauthParams).sort().map((k) => `${encodeURIComponent(k)}="${encodeURIComponent(oauthParams[k])}"`);
-    return `OAuth ${headerParts.join(", ")}`;
-  }
-  // --- Posting Tweets (Telegram ➔ X) ---
-  async postTweet(creds, text, options) {
-    const url = "https://api.twitter.com/2/tweets";
-    const payload = { text };
-    if (options?.mediaIds && options.mediaIds.length > 0) {
-      payload.media = { media_ids: options.mediaIds };
-    }
-    if (options?.inReplyToTweetId) {
-      payload.reply = { in_reply_to_tweet_id: options.inReplyToTweetId };
-    }
-    const headers = {
-      "Content-Type": "application/json"
-    };
-    if (creds.oauth2AccessToken) {
-      headers["Authorization"] = `Bearer ${creds.oauth2AccessToken}`;
-    } else if (creds.apiKey && creds.apiSecret && creds.accessToken && creds.accessSecret) {
-      headers["Authorization"] = this.getOAuth1Header({
-        url,
-        method: "POST",
-        apiKey: creds.apiKey,
-        apiSecret: creds.apiSecret,
-        accessToken: creds.accessToken,
-        accessSecret: creds.accessSecret
-      });
-    } else if (creds.bearerToken) {
-      headers["Authorization"] = `Bearer ${creds.bearerToken}`;
-    } else if (this.defaultBearerToken) {
-      headers["Authorization"] = `Bearer ${this.defaultBearerToken}`;
-    } else {
-      throw new Error(
-        "No X (Twitter) credentials configured. Please authenticate via OAuth2 or provide API keys in Settings."
-      );
-    }
-    const res = await fetch(url, {
-      method: "POST",
-      headers,
-      body: JSON.stringify(payload)
-    });
-    const json = await res.json();
-    if (!res.ok) {
-      const errorMsg = json.detail || json.errors?.[0]?.message || res.statusText;
-      const error = new Error(`X API [${res.status}]: ${errorMsg}`);
-      error.status = res.status;
-      error.data = json;
-      throw error;
-    }
-    return {
-      id: json.data?.id || `tweet_${Date.now()}`,
-      text: json.data?.text || text
-    };
-  }
-  async postThread(creds, threadTexts, mediaIds) {
-    const postedIds = [];
-    let lastTweetId = void 0;
-    for (let i = 0; i < threadTexts.length; i++) {
-      const text = threadTexts[i];
-      const tweetMedia = i === 0 ? mediaIds : void 0;
-      const result = await this.postTweet(creds, text, {
-        mediaIds: tweetMedia,
-        inReplyToTweetId: lastTweetId
-      });
-      postedIds.push(result.id);
-      lastTweetId = result.id;
-      if (i < threadTexts.length - 1) {
-        await new Promise((r) => setTimeout(r, 1200));
-      }
-    }
-    return postedIds;
-  }
-  // --- Media Upload (X API v1.1) ---
-  async uploadMedia(creds, mediaBuffer, mimeType = "image/jpeg") {
-    const url = "https://upload.twitter.com/1.1/media/upload.json";
-    const formData = new FormData();
-    const blob = new Blob([mediaBuffer], { type: mimeType });
-    formData.append("media", blob);
-    const headers = {};
-    if (creds.apiKey && creds.apiSecret && creds.accessToken && creds.accessSecret) {
-      headers["Authorization"] = this.getOAuth1Header({
-        url,
-        method: "POST",
-        apiKey: creds.apiKey,
-        apiSecret: creds.apiSecret,
-        accessToken: creds.accessToken,
-        accessSecret: creds.accessSecret
-      });
-    } else if (creds.oauth2AccessToken) {
-      headers["Authorization"] = `Bearer ${creds.oauth2AccessToken}`;
-    } else {
-      throw new Error("X media upload requires OAuth credentials (API Key + Access Token or OAuth2).");
-    }
-    const res = await fetch(url, {
-      method: "POST",
-      headers,
-      body: formData
-    });
-    const json = await res.json();
-    if (!res.ok) {
-      throw new Error(`X Media Upload error: ${json.error || json.errors?.[0]?.message || res.statusText}`);
-    }
-    return json.media_id_string || String(json.media_id);
-  }
-  // --- Source Monitoring (X ➔ Telegram) using Official X API v2 ---
-  async fetchRecentTweets(authorHandle, sinceId, overrideBearerOrTokens) {
-    let handle = authorHandle.trim();
-    const urlMatch = handle.match(/(?:https?:\/\/)?(?:www\.)?(?:twitter\.com|x\.com)\/([a-zA-Z0-9_]{1,25})/i);
-    if (urlMatch) {
-      handle = urlMatch[1];
-    } else {
-      handle = handle.replace(/^@+/, "").trim();
-    }
-    let candidateTokens = [];
-    if (typeof overrideBearerOrTokens === "string" && overrideBearerOrTokens.trim()) {
-      candidateTokens.push(overrideBearerOrTokens.trim());
-    } else if (overrideBearerOrTokens && typeof overrideBearerOrTokens === "object") {
-      if (overrideBearerOrTokens.bearerToken?.trim()) {
-        candidateTokens.push(overrideBearerOrTokens.bearerToken.trim());
-      }
-      if (overrideBearerOrTokens.oauth2AccessToken?.trim()) {
-        candidateTokens.push(overrideBearerOrTokens.oauth2AccessToken.trim());
-      }
-    }
-    if (this.defaultBearerToken && this.defaultBearerToken.trim() && !this.defaultBearerToken.includes("TODO")) {
-      candidateTokens.push(this.defaultBearerToken.trim());
-    }
-    candidateTokens = candidateTokens.filter((t, idx, arr) => arr.indexOf(t) === idx && t.length > 10);
-    if (candidateTokens.length === 0) {
-      const err = new Error(
-        `Official X API requires a valid TWITTER_BEARER_TOKEN or connected X OAuth 2.0 account to monitor ${authorHandle}.`
-      );
-      err.isMissingToken = true;
-      throw err;
-    }
-    let lastError = null;
-    for (const bearer of candidateTokens) {
-      try {
-        return await this.fetchViaOfficialApi(handle, sinceId, bearer);
-      } catch (err) {
-        lastError = err instanceof Error ? err : new Error(String(err));
-        continue;
-      }
-    }
-    throw lastError || new Error(`Failed polling ${authorHandle} via Official X API`);
-  }
-  async fetchViaOfficialApi(handle, sinceId, bearer) {
-    const userRes = await fetch(`https://api.twitter.com/2/users/by/username/${handle}`, {
-      headers: { Authorization: `Bearer ${bearer}` }
-    });
-    const userJson = await userRes.json();
-    if (!userRes.ok || !userJson.data?.id) {
-      const errDetail = userJson.detail || userJson.errors?.[0]?.message || userRes.statusText;
-      if (errDetail?.toLowerCase().includes("credits depleted")) {
-        const err = new Error(
-          `Official X API read quota depleted for @${handle} (credits depleted). Twitter Developer accounts on Free tier allow write access (Telegram \u2794 X), while timeline read access requires X API credits or an updated TWITTER_BEARER_TOKEN.`
-        );
-        err.isCreditsDepleted = true;
-        throw err;
-      }
-      throw new Error(`Official X API user lookup for @${handle} failed: ${errDetail}`);
-    }
-    const xUserId = userJson.data.id;
-    let url = `https://api.twitter.com/2/users/${xUserId}/tweets?max_results=10&tweet.fields=created_at,entities,attachments&expansions=attachments.media_keys&media.fields=url,preview_image_url,type,variants`;
-    if (sinceId) {
-      url += `&since_id=${sinceId}`;
-    }
-    const tweetRes = await fetch(url, {
-      headers: { Authorization: `Bearer ${bearer}` }
-    });
-    if (tweetRes.status === 429) {
-      const resetHeader = tweetRes.headers.get("x-rate-limit-reset");
-      const resetSeconds = resetHeader ? Math.max(1, parseInt(resetHeader) - Math.floor(Date.now() / 1e3)) : 60;
-      throw new Error(`X API Rate Limit reached for @${handle}. Rate limit resets in ${resetSeconds}s.`);
-    }
-    const tweetJson = await tweetRes.json();
-    if (!tweetRes.ok) {
-      const errDetail = tweetJson.detail || tweetJson.errors?.[0]?.message || tweetRes.statusText;
-      throw new Error(`Official X API tweet fetch for @${handle} failed: ${errDetail}`);
-    }
-    const tweets = tweetJson.data || [];
-    const mediaMap = /* @__PURE__ */ new Map();
-    if (tweetJson.includes?.media) {
-      for (const m of tweetJson.includes.media) {
-        mediaMap.set(m.media_key, {
-          type: m.type === "video" ? "video" : m.type === "animated_gif" ? "gif" : "image",
-          url: m.url || m.preview_image_url || ""
-        });
-      }
-    }
-    return tweets.map((t) => {
-      const mediaList = [];
-      if (t.attachments?.media_keys) {
-        for (const k of t.attachments.media_keys) {
-          const m = mediaMap.get(k);
-          if (m && m.url) mediaList.push(m);
-        }
-      }
-      return {
-        id: t.id,
-        text: t.text,
-        author: `@${handle}`,
-        createdAt: t.created_at || (/* @__PURE__ */ new Date()).toISOString(),
-        url: `https://x.com/${handle}/status/${t.id}`,
-        media: mediaList
-      };
-    });
-  }
-};
-var xClient = new XClient();
 
 // server/gemini.ts
 import { GoogleGenAI, Type } from "@google/genai";
@@ -1747,14 +1826,17 @@ var SourceMonitor = class {
     this.isChecking = false;
     this.checkIntervalMs = 6e4;
     // Poll every 60 seconds
-    // Tracks cooldowns per automation (e.g. rate limit, credits depleted) to prevent rapid error loops
+    // Tracks cooldowns per automation (e.g. rate limit reset) to prevent rapid error loops
     this.pollCooldowns = /* @__PURE__ */ new Map();
+    // Tracks last logged error to prevent duplicate system log spam
+    this.lastLoggedErrors = /* @__PURE__ */ new Map();
     if (!isAiStudioEnvironment()) {
       this.start();
     }
   }
   resetCooldown(autoId) {
     this.pollCooldowns.delete(autoId);
+    this.lastLoggedErrors.delete(autoId);
   }
   start() {
     if (isAiStudioEnvironment()) {
@@ -1816,6 +1898,7 @@ var SourceMonitor = class {
         }
       );
       this.pollCooldowns.delete(auto.id);
+      this.lastLoggedErrors.delete(auto.id);
       if (!tweets || tweets.length === 0) {
         db.updateAutomation(auto.id, auto.userId, {
           lastPollAt: (/* @__PURE__ */ new Date()).toISOString(),
@@ -1823,7 +1906,13 @@ var SourceMonitor = class {
         });
         return;
       }
-      const sorted = [...tweets].sort((a, b) => a.id.localeCompare(b.id));
+      const sorted = [...tweets].sort((a, b) => {
+        try {
+          return BigInt(a.id) < BigInt(b.id) ? -1 : 1;
+        } catch {
+          return a.id.localeCompare(b.id);
+        }
+      });
       let newestId = auto.lastSeenPostId;
       for (const t of sorted) {
         automationQueue.enqueuePost(auto, {
@@ -1843,28 +1932,30 @@ var SourceMonitor = class {
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       const isCreditsDepleted = Boolean(
-        err?.isCreditsDepleted || msg.toLowerCase().includes("credits depleted")
+        err?.isCreditsDepleted || msg.toLowerCase().includes("credits depleted") || msg.toLowerCase().includes("read quota depleted") || msg.toLowerCase().includes("quota") || msg.toLowerCase().includes("usage cap")
       );
-      const isRateLimit = msg.toLowerCase().includes("rate limit") || msg.includes("429");
-      const cooldownMs = isCreditsDepleted ? 60 * 60 * 1e3 : isRateLimit ? 15 * 60 * 1e3 : 5 * 60 * 1e3;
-      const cooldownMinutes = Math.round(cooldownMs / 6e4);
-      const prevCooldown = this.pollCooldowns.get(auto.id);
-      const isStatusTransition = !prevCooldown || prevCooldown.isDepleted !== isCreditsDepleted;
-      this.pollCooldowns.set(auto.id, {
-        nextCheck: Date.now() + cooldownMs,
-        lastError: msg,
-        isDepleted: isCreditsDepleted
-      });
-      const friendlyNotice = isCreditsDepleted ? `X API read quota depleted for ${handle}. Official X Developer Free Tier supports posting to X (Telegram \u2794 X), but reading timelines requires X API Basic credits. Check back after credits refresh or update TWITTER_BEARER_TOKEN.` : msg;
+      const isRateLimit = Boolean(err?.isRateLimit || msg.toLowerCase().includes("rate limit") || msg.includes("429"));
+      if (isRateLimit) {
+        this.pollCooldowns.set(auto.id, {
+          nextCheck: Date.now() + 60 * 1e3,
+          lastError: msg,
+          isDepleted: false
+        });
+      } else {
+        this.pollCooldowns.delete(auto.id);
+      }
+      const friendlyNotice = isCreditsDepleted ? `Official X API read quota is currently depleted for ${handle}. Official X Developer Free Tier supports posting to X (Telegram \u2794 X), but reading timelines requires X API Basic credits. Check back after credits refresh or update TWITTER_BEARER_TOKEN.` : msg;
       db.updateAutomation(auto.id, auto.userId, {
         lastError: friendlyNotice,
         lastPollAt: (/* @__PURE__ */ new Date()).toISOString()
       });
-      if (isStatusTransition) {
+      const prevLogged = this.lastLoggedErrors.get(auto.id);
+      if (prevLogged !== friendlyNotice) {
+        this.lastLoggedErrors.set(auto.id, friendlyNotice);
         db.logSystem(
-          "info",
+          "warn",
           "monitor",
-          `Polling paused for X source ${handle}: ${friendlyNotice} (Next automatic check in ${cooldownMinutes}m)`,
+          `Polling X source ${handle}: ${friendlyNotice}`,
           auto.userId
         );
       }
@@ -2498,7 +2589,7 @@ You have not connected an X account yet. Authorize your account below with 1 cli
       return {
         text: `\u{1F426} **Step 1 of 2: Which X (Twitter) account do you want to monitor?**
 
-Please send the X profile/post URL or handle in the chat below (for example: \`https://x.com/OpenAI\` or \`@OpenAI\`):
+Please send the X profile URL in the chat below (for example: \`https://x.com/OpenAI\`):
 
 *(No password or API key is required)*`,
         replyMarkup: {
@@ -2580,31 +2671,17 @@ Choose the sync direction for this bridge:`,
     const cleanInput = text.trim();
     if (wizard.step === "source") {
       if (wizard.direction === "x_to_telegram") {
-        if (isXUrl(cleanInput)) {
-          const xUrl = formatXInput(cleanInput);
-          wizard.source = xUrl;
-          wizard.step = "destination";
+        const xUrl = formatXInput(cleanInput);
+        if (!xUrl || !/^https:\/\/x\.com\/[a-zA-Z0-9_]{1,25}/i.test(xUrl)) {
           return {
-            text: `\u2705 Source set to: ${xUrl}
-
-\u{1F4E2} **Step 2 of 2: Where should new posts be published in Telegram?**
-
-1\uFE0F\u20E3 Add this bot as an **Administrator** in your Telegram channel with *Post Messages* permission.
-2\uFE0F\u20E3 Send your channel username or link below (for example: \`@my_channel\` or \`https://t.me/my_channel\`):`,
+            text: `\u26A0\uFE0F Please enter a valid X (Twitter) URL (e.g. \`https://x.com/OpenAI\`):`,
             replyMarkup: { inline_keyboard: [[{ text: "\xAB Cancel", callback_data: "main_menu" }]] }
           };
         }
-        const handle = cleanInput.startsWith("@") ? cleanInput : `@${cleanInput}`;
-        if (!/^@[a-zA-Z0-9_]{1,25}$/.test(handle)) {
-          return {
-            text: `\u26A0\uFE0F Please enter a valid X (Twitter) URL (e.g. \`https://x.com/OpenAI\`) or handle (\`@OpenAI\`):`,
-            replyMarkup: { inline_keyboard: [[{ text: "\xAB Cancel", callback_data: "main_menu" }]] }
-          };
-        }
-        wizard.source = handle;
+        wizard.source = xUrl;
         wizard.step = "destination";
         return {
-          text: `\u2705 Source set to: **${handle}**
+          text: `\u2705 Source set to: ${xUrl}
 
 \u{1F4E2} **Step 2 of 2: Where should new posts be published in Telegram?**
 
@@ -2625,7 +2702,7 @@ Please enter your channel username (e.g. \`@my_channel\`) or invite link:`,
         wizard.source = parsed.canonical;
         wizard.step = "destination";
         const userXHandle = user.settings.xCredentials?.accountHandle;
-        const destination = userXHandle ? userXHandle.startsWith("http") ? userXHandle : `https://x.com/${userXHandle.replace(/^@/, "")}` : user.telegramUsername ? `https://x.com/${user.telegramUsername.replace(/^@/, "")}` : "https://x.com";
+        const destination = userXHandle ? formatXInput(userXHandle) : user.telegramUsername ? formatXInput(user.telegramUsername) : "https://x.com";
         wizard.destination = destination;
         return this.finishWizard(user, wizard);
       }
@@ -2647,11 +2724,11 @@ Please enter your channel username (e.g. \`@my_channel\`) or invite link:`,
         destination = formatXInput(cleanInput);
       }
       wizard.destination = destination;
-      return this.finishWizard(user, wizard);
+      return await this.finishWizard(user, wizard);
     }
     return this.getMainMenu(user);
   }
-  finishWizard(user, wizard) {
+  async finishWizard(user, wizard) {
     userWizards.delete(user.id);
     const newAuto = {
       id: `auto_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
@@ -2677,15 +2754,47 @@ Please enter your channel username (e.g. \`@my_channel\`) or invite link:`,
       createdAt: (/* @__PURE__ */ new Date()).toISOString(),
       updatedAt: (/* @__PURE__ */ new Date()).toISOString()
     };
+    const isXToTg = newAuto.direction === "x_to_telegram";
+    let initialErrorNotice = void 0;
+    if (isXToTg) {
+      try {
+        const creds = user.settings?.xCredentials;
+        const testTweets = await xClient.fetchRecentTweets(newAuto.source, void 0, {
+          bearerToken: creds?.bearerToken,
+          oauth2AccessToken: creds?.oauth2AccessToken
+        });
+        if (testTweets && testTweets.length > 0) {
+          const newest = [...testTweets].sort((a, b) => {
+            try {
+              return BigInt(a.id) < BigInt(b.id) ? -1 : 1;
+            } catch {
+              return a.id.localeCompare(b.id);
+            }
+          }).pop();
+          if (newest) {
+            newAuto.lastSeenPostId = newest.id;
+          }
+        }
+      } catch (checkErr) {
+        const errMsg = checkErr instanceof Error ? checkErr.message : String(checkErr);
+        const isQuota = checkErr?.isCreditsDepleted || errMsg.toLowerCase().includes("credits depleted") || errMsg.toLowerCase().includes("quota") || errMsg.toLowerCase().includes("usage cap");
+        initialErrorNotice = isQuota ? `Official X API read quota is currently depleted for ${newAuto.source}. Free tier permits posting to X (Telegram \u2794 X), but reading timelines requires X API Basic credits or an updated TWITTER_BEARER_TOKEN.` : errMsg;
+        newAuto.lastError = initialErrorNotice;
+      }
+    }
     db.createAutomation(newAuto);
     db.logSystem("info", "telegram_bot", `User activated cross-posting bridge: ${newAuto.name}`, user.id);
-    const isXToTg = newAuto.direction === "x_to_telegram";
+    const bridgeName = getBridgeDisplayName(newAuto);
+    const statusLine = initialErrorNotice ? `\u26A0\uFE0F **Active (Notice: X API Read Quota Depleted)**
+
+\u26A0\uFE0F **Notice**: ${initialErrorNotice}
+*Timeline monitoring will automatically sync new posts as soon as valid X read credits or bearer token are detected.*` : `\u{1F7E2} **Active**`;
     return {
       text: `\u{1F389} **Cross-Posting Bridge is Live!**
 
-\u2022 **Bridge**: ${newAuto.name}
+\u2022 **Bridge**: ${bridgeName}
 \u2022 **Direction**: ${isXToTg ? "X (Twitter) \u2794 Telegram" : "Telegram \u2794 X (Twitter)"}
-\u2022 **Status**: \u{1F7E2} **Active**
+\u2022 **Status**: ${statusLine}
 
 \u2728 **AI Fact Preservation**: Active (all dates, quotes & numbers preserved)
 \u{1F6E1}\uFE0F **Spam & Ad Filter**: Active (promotional ads & shills automatically blocked)
@@ -2703,6 +2812,7 @@ Please enter your channel username (e.g. \`@my_channel\`) or invite link:`,
   getMainMenu(user) {
     const automations = db.getAutomations(user.id);
     const activeCount = automations.filter((a) => a.status === "active").length;
+    const warningCount = automations.filter((a) => a.status === "active" && a.lastError).length;
     const webLoginUrl = getTelegramButtonUrl(`/?auth_token=${user.authToken}`);
     if (automations.length === 0) {
       return {
@@ -2732,11 +2842,15 @@ I automatically sync your content between X and Telegram channels with:
         }
       };
     }
+    let workspaceLine = `\u2022 Active Bridges: **${activeCount} / ${automations.length}**`;
+    if (warningCount > 0) {
+      workspaceLine += ` (\u26A0\uFE0F ${warningCount} pending X credits)`;
+    }
     return {
       text: `\u{1F44B} **Welcome back, ${user.firstName}!**
 
 \u{1F4CA} **Your Workspace:**
-\u2022 Active Bridges: **${activeCount} / ${automations.length}**
+${workspaceLine}
 \u2022 Posts Processed: **${user.postsProcessedCount || 0}**
 \u2022 Ads Blocked: **${user.postsFilteredAdsCount || 0}**
 
@@ -2781,9 +2895,20 @@ Click **\u2795 Set Up New Bridge** below to link your first X handle and Telegra
     }
     const keyboard = [];
     automations.forEach((auto, i) => {
-      const icon = auto.status === "active" ? "\u{1F7E2}" : "\u23F8\uFE0F";
-      text += `${i + 1}. ${icon} **${auto.name}**
-   Processed: ${auto.stats.processedCount} | Blocked Ads: ${auto.stats.skippedAdsCount}
+      const isPaused = auto.status !== "active";
+      const isQuota = auto.lastError?.toLowerCase().includes("quota") || auto.lastError?.toLowerCase().includes("credits");
+      let icon = "\u{1F7E2}";
+      let errorLine = "";
+      if (isPaused) {
+        icon = "\u23F8\uFE0F";
+      } else if (auto.lastError) {
+        icon = "\u26A0\uFE0F";
+        errorLine = `   \u26A0\uFE0F **Status Note**: ${isQuota ? "X API Read Quota Depleted" : "X Reading Issue"}
+`;
+      }
+      const displayName = getBridgeDisplayName(auto);
+      text += `${i + 1}. ${icon} **${displayName}**
+${errorLine}   Processed: ${auto.stats.processedCount} | Blocked Ads: ${auto.stats.skippedAdsCount}
 
 `;
       keyboard.push([
@@ -3194,7 +3319,7 @@ async function startServer() {
     const automations = db.getAutomations(userId);
     res.json({ ok: true, automations });
   });
-  app.post("/api/user/automations", (req, res) => {
+  app.post("/api/user/automations", async (req, res) => {
     try {
       const { userId, name, direction, source, destination, settings } = req.body;
       if (!userId || !source || !destination) {
@@ -3240,6 +3365,34 @@ async function startServer() {
         createdAt: (/* @__PURE__ */ new Date()).toISOString(),
         updatedAt: (/* @__PURE__ */ new Date()).toISOString()
       });
+      if (created.direction === "x_to_telegram") {
+        const creds = user?.settings?.xCredentials;
+        try {
+          const testTweets = await xClient.fetchRecentTweets(created.source, void 0, {
+            bearerToken: creds?.bearerToken,
+            oauth2AccessToken: creds?.oauth2AccessToken
+          });
+          if (testTweets && testTweets.length > 0) {
+            const newest = [...testTweets].sort((a, b) => {
+              try {
+                return BigInt(a.id) < BigInt(b.id) ? -1 : 1;
+              } catch {
+                return a.id.localeCompare(b.id);
+              }
+            }).pop();
+            if (newest) {
+              db.updateAutomation(created.id, userId, { lastSeenPostId: newest.id });
+              created.lastSeenPostId = newest.id;
+            }
+          }
+        } catch (checkErr) {
+          const errMsg = checkErr instanceof Error ? checkErr.message : String(checkErr);
+          const isQuota = checkErr?.isCreditsDepleted || errMsg.toLowerCase().includes("credits depleted") || errMsg.toLowerCase().includes("quota") || errMsg.toLowerCase().includes("usage cap");
+          const notice = isQuota ? `Official X API read quota is currently depleted for ${created.source}. Free tier permits posting to X (Telegram \u2794 X), but reading requires X API Basic credits. You can still test your bridge using the 'Test Run' button.` : errMsg;
+          db.updateAutomation(created.id, userId, { lastError: notice });
+          created.lastError = notice;
+        }
+      }
       db.logSystem("info", "api", `Created automation ${created.name}`, userId);
       res.json({ ok: true, automation: created });
     } catch (err) {
@@ -3278,7 +3431,9 @@ async function startServer() {
           );
         } catch (pollErr) {
           const pollMsg = pollErr instanceof Error ? pollErr.message : String(pollErr);
-          const isCreditsDepleted = pollMsg.toLowerCase().includes("credits depleted");
+          const isCreditsDepleted = Boolean(
+            pollErr?.isCreditsDepleted || pollMsg.toLowerCase().includes("credits depleted") || pollMsg.toLowerCase().includes("quota") || pollMsg.toLowerCase().includes("usage cap")
+          );
           const notice = isCreditsDepleted ? `Official X API read quota is currently depleted for ${auto.source}. Free tier permits posting to X (Telegram \u2794 X), but reading requires X API Basic credits. You can still test your bridge using the 'Test Run' button.` : pollMsg;
           db.updateAutomation(auto.id, userId, {
             lastError: notice,
@@ -3292,7 +3447,14 @@ async function startServer() {
           });
         }
         if (tweets && tweets.length > 0) {
-          for (const t of tweets) {
+          const sorted = [...tweets].sort((a, b) => {
+            try {
+              return BigInt(a.id) < BigInt(b.id) ? -1 : 1;
+            } catch {
+              return a.id.localeCompare(b.id);
+            }
+          });
+          for (const t of sorted) {
             automationQueue.enqueuePost(auto, {
               sourcePostId: t.id,
               sourceAuthor: t.author,
@@ -3301,12 +3463,13 @@ async function startServer() {
               media: t.media
             });
           }
+          const newest = sorted[sorted.length - 1];
           db.updateAutomation(auto.id, userId, {
-            lastSeenPostId: tweets[0].id,
+            lastSeenPostId: newest.id,
             lastPollAt: (/* @__PURE__ */ new Date()).toISOString(),
             lastError: void 0
           });
-          return res.json({ ok: true, syncedCount: tweets.length, message: `Queued ${tweets.length} new tweets for processing!` });
+          return res.json({ ok: true, syncedCount: sorted.length, message: `Queued ${sorted.length} new tweets for processing!` });
         }
         db.updateAutomation(auto.id, userId, {
           lastPollAt: (/* @__PURE__ */ new Date()).toISOString(),

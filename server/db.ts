@@ -3,6 +3,7 @@ import path from 'path';
 import crypto from 'node:crypto';
 import { MongoClient, Db as MongoDatabase } from 'mongodb';
 import { getAppUrl, getTelegramButtonUrl } from './config.ts';
+import { formatXInput, getBridgeDisplayName } from './xFormat.ts';
 import {
   BotUser,
   Automation,
@@ -110,6 +111,47 @@ class Database {
     }
   }
 
+  public normalizeAutomation(auto: Automation): Automation {
+    if (!auto) return auto;
+    let changed = false;
+
+    if (auto.direction === 'x_to_telegram') {
+      const canonicalSource = formatXInput(auto.source);
+      if (canonicalSource && canonicalSource !== auto.source) {
+        auto.source = canonicalSource;
+        changed = true;
+      }
+      const canonicalName = getBridgeDisplayName(auto);
+      if (auto.name !== canonicalName) {
+        auto.name = canonicalName;
+        changed = true;
+      }
+    } else if (auto.direction === 'telegram_to_x') {
+      const canonicalDest = formatXInput(auto.destination);
+      if (canonicalDest && canonicalDest !== auto.destination) {
+        auto.destination = canonicalDest;
+        changed = true;
+      }
+      const canonicalName = getBridgeDisplayName(auto);
+      if (auto.name !== canonicalName) {
+        auto.name = canonicalName;
+        changed = true;
+      }
+    }
+
+    if (changed && this.isMongoConnected && this.mongoDb) {
+      this.mongoDb
+        .collection('automations')
+        .updateOne(
+          { id: auto.id, userId: auto.userId },
+          { $set: { source: auto.source, destination: auto.destination, name: auto.name } }
+        )
+        .catch(() => {});
+    }
+
+    return auto;
+  }
+
   private async hydrateFromMongo() {
     if (!this.mongoDb) return;
     try {
@@ -122,7 +164,7 @@ class Database {
       ]);
 
       if (users.length > 0) this.data.users = users;
-      if (automations.length > 0) this.data.automations = automations;
+      if (automations.length > 0) this.data.automations = automations.map((a) => this.normalizeAutomation(a));
       if (posts.length > 0) this.data.posts = posts;
       if (otherBots.length > 0) this.data.otherBots = otherBots;
       if (settingsDoc?.settings) {
@@ -145,9 +187,10 @@ class Database {
       if (fs.existsSync(DB_FILE)) {
         const raw = fs.readFileSync(DB_FILE, 'utf-8');
         const parsed = JSON.parse(raw);
+        const rawAutos = Array.isArray(parsed.automations) ? parsed.automations : [];
         return {
           users: Array.isArray(parsed.users) ? parsed.users : [],
-          automations: Array.isArray(parsed.automations) ? parsed.automations : [],
+          automations: rawAutos.map((a: Automation) => this.normalizeAutomation(a)),
           posts: Array.isArray(parsed.posts) ? parsed.posts : [],
           otherBots: Array.isArray(parsed.otherBots) ? parsed.otherBots : [],
           systemLogs: Array.isArray(parsed.systemLogs) ? parsed.systemLogs : [],
@@ -268,15 +311,18 @@ class Database {
   // --- Automations ---
 
   public getAutomations(userId: string): Automation[] {
-    return this.data.automations.filter((a) => a.userId === userId);
+    return this.data.automations
+      .filter((a) => a.userId === userId)
+      .map((a) => this.normalizeAutomation(a));
   }
 
   public getAllAutomations(): Automation[] {
-    return this.data.automations;
+    return this.data.automations.map((a) => this.normalizeAutomation(a));
   }
 
   public getAutomation(id: string, userId?: string): Automation | undefined {
-    return this.data.automations.find((a) => a.id === id && (!userId || a.userId === userId));
+    const auto = this.data.automations.find((a) => a.id === id && (!userId || a.userId === userId));
+    return auto ? this.normalizeAutomation(auto) : undefined;
   }
 
   public createAutomation(auto: Automation): Automation {
